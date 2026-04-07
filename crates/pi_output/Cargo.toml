@@ -1,0 +1,14 @@
+[package]
+name    = "pi_output"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+# smart-leds-trait for Rgb type compatibility.
+smart-leds-trait = "0.2"
+
+# ws281x-rpi only compiles on ARM Linux (the Pi).
+# On other platforms we compile the SimulatedOutput instead.
+[target.'cfg(all(target_arch = "arm", target_os = "linux"))'.dependencies]
+ws281x-rpi = "0.0.1"

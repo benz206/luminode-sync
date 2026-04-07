@@ -1,0 +1,11 @@
+[package]
+name    = "light_engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+beatmap_core  = { path = "../beatmap_core" }
+runtime_sync  = { path = "../runtime_sync" }
+serde         = { workspace = true }
+toml          = { workspace = true }
+anyhow        = { workspace = true }

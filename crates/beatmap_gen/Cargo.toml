@@ -1,0 +1,28 @@
+[package]
+name    = "beatmap_gen"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+beatmap_core = { path = "../beatmap_core" }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+anyhow       = { workspace = true }
+sha2         = { workspace = true }
+hex          = { workspace = true }
+
+# Pure-Rust audio decoding — supports FLAC, MP3, AAC, OGG, WAV.
+# No C library required.
+symphonia = { version = "0.5", features = [
+    "all-formats",
+    "all-codecs",
+    "mp3",
+    "aac",
+] }
+
+# FFT for spectral analysis
+realfft = "3"
+
+# Parallel directory scanning
+rayon    = "1"
+walkdir  = "2"

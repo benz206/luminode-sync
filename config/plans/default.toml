@@ -1,0 +1,146 @@
+# default.toml — light plan
+#
+# This file controls HOW the beatmap data gets turned into LED effects.
+# Edit freely without touching your beatmaps.
+#
+# Precedence (highest → lowest):
+#   cue_rule > beat_rule (layered over) > section_rule (base)
+#
+# If no section matches, the [fallback] effect is used.
+# If no beatmap is available for the current track, [fallback] is used.
+
+# ── Palettes ──────────────────────────────────────────────────────────────────
+# Each palette is a list of #RRGGBB hex colors.
+# Effects blend between them smoothly.
+
+[palette.cool]
+colors = ["#0033ff", "#00ccff", "#6600ff"]
+
+[palette.warm]
+colors = ["#ff6600", "#ff3300", "#ffcc00"]
+
+[palette.hot]
+colors = ["#ffffff", "#ff0000", "#ff6600"]
+
+[palette.electric]
+colors = ["#00ff99", "#0066ff", "#cc00ff"]
+
+[palette.amber]
+colors = ["#ff8800", "#ffcc00", "#ff4400"]
+
+[palette.ice]
+colors = ["#aaeeff", "#ffffff", "#0044ff"]
+
+
+# ── Fallback (no beatmap / unknown track) ─────────────────────────────────────
+[fallback]
+effect  = "slow_gradient"
+palette = "cool"
+speed   = 0.3
+
+
+# ── Section rules ─────────────────────────────────────────────────────────────
+# Matched by section name.  First match wins.
+# Fields: section, effect, palette, intensity [0-1], speed [0-1]
+
+[[section_rule]]
+section   = "intro"
+effect    = "breathe"
+palette   = "cool"
+intensity = 0.35
+speed     = 0.4
+
+[[section_rule]]
+section   = "verse"
+effect    = "slow_chase"
+palette   = "cool"
+intensity = 0.55
+speed     = 0.5
+
+[[section_rule]]
+section   = "chorus"
+effect    = "fast_chase"
+palette   = "warm"
+intensity = 0.80
+speed     = 0.8
+
+[[section_rule]]
+section   = "buildup"
+effect    = "rise"
+palette   = "amber"
+intensity = 0.70
+speed     = 0.7
+
+[[section_rule]]
+section   = "drop"
+effect    = "strobe_chase"
+palette   = "hot"
+intensity = 1.0
+speed     = 1.0
+
+[[section_rule]]
+section   = "breakdown"
+effect    = "breathe"
+palette   = "ice"
+intensity = 0.30
+speed     = 0.3
+
+[[section_rule]]
+section   = "bridge"
+effect    = "slow_gradient"
+palette   = "electric"
+intensity = 0.50
+speed     = 0.5
+
+[[section_rule]]
+section   = "outro"
+effect    = "fade_out"
+palette   = "cool"
+intensity = 0.40
+speed     = 0.3
+
+
+# ── Beat rules ────────────────────────────────────────────────────────────────
+# Triggered once per beat/downbeat.  Layered on top of the section effect.
+
+[[beat_rule]]
+beat_class = "downbeat"
+trigger    = "kick_pulse"
+strength   = 0.45
+
+[[beat_rule]]
+beat_class = "beat"
+trigger    = "soft_pulse"
+strength   = 0.12
+
+
+# ── Cue rules ─────────────────────────────────────────────────────────────────
+# Triggered once when a cue marker is reached.
+
+[[cue_rule]]
+cue         = "drop"
+trigger     = "white_flash"
+duration_ms = 80
+priority    = 100
+strength    = 1.0
+
+[[cue_rule]]
+cue         = "impact"
+trigger     = "color_burst"
+duration_ms = 60
+priority    = 90
+strength    = 0.8
+
+[[cue_rule]]
+cue         = "fill"
+trigger     = "kick_pulse"
+duration_ms = 120
+priority    = 70
+strength    = 0.6
+
+[[cue_rule]]
+cue         = "build"
+trigger     = "color_burst"
+duration_ms = 200
+priority    = 80
+strength    = 0.7

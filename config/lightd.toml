@@ -1,0 +1,29 @@
+# lightd.toml — runtime daemon configuration
+# Copy to /etc/luminode-sync/lightd.toml on the Pi.
+
+# Library directory containing beatmaps/ and index.json.
+# Populate this on your dev machine and rsync to the Pi.
+library = "/home/pi/.local/share/luminode-sync"
+
+# Light plan — declarative rules mapping music → effects.
+# Edit this to change how songs are lit without touching beatmaps.
+plan = "/etc/luminode-sync/plans/default.toml"
+
+[spotify]
+# Get these from developer.spotify.com (create a free app).
+client_id  = "YOUR_SPOTIFY_CLIENT_ID"
+# Run `beatmap-cli auth --client-id <id>` once to generate this file.
+token_file = "/home/pi/.local/share/luminode-sync/spotify_token.json"
+
+[leds]
+# Number of LEDs in your strip.
+count = 259
+
+[sync]
+# How often to poll Spotify (seconds).
+# 3s is a good default: low enough to catch track changes quickly,
+# high enough to stay well under Spotify's rate limits.
+poll_interval_secs = 3.0
+
+# Target render frame rate.
+fps = 60

@@ -1,0 +1,14 @@
+[package]
+name    = "runtime_sync"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+beatmap_core = { path = "../beatmap_core" }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+anyhow       = { workspace = true }
+tokio        = { workspace = true }
+tracing      = { workspace = true }
+reqwest      = { workspace = true }
+thiserror    = { workspace = true }

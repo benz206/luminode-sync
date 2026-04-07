@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "track": {
+    "title": "Example Track",
+    "artist": "Example Artist",
+    "album": "Example Album",
+    "duration_ms": 240000,
+    "spotify_id": "3n3Ppam7vgaVa1iaRUIOKE",
+    "isrc": "USRC11600863",
+    "source_hash": "a3f8e2c1...",
+    "detected_bpm": 128.0
+  },
+  "timing": {
+    "first_beat_ms": 732,
+    "beat_deltas_ms": [
+      469, 469, 469, 469,
+      469, 469, 469, 469,
+      469, 469, 469, 469
+    ],
+    "downbeat_bits": [137, 0, 0, 0],
+    "time_sig": 4
+  },
+  "sections": [
+    { "start_beat": 0,  "kind": "intro",     "energy": 60  },
+    { "start_beat": 32, "kind": "verse",     "energy": 140 },
+    { "start_beat": 64, "kind": "chorus",    "energy": 200 },
+    { "start_beat": 96, "kind": "buildup",   "energy": 185 },
+    { "start_beat": 128,"kind": "drop",      "energy": 245 },
+    { "start_beat": 160,"kind": "breakdown", "energy": 85  },
+    { "start_beat": 192,"kind": "chorus",    "energy": 210 },
+    { "start_beat": 224,"kind": "outro",     "energy": 55  }
+  ],
+  "cues": [
+    { "position_ms": 60032, "kind": "drop"   },
+    { "position_ms": 75200, "kind": "impact" },
+    { "position_ms": 90200, "kind": "fill"   }
+  ],
+  "energy": {
+    "sample_every_n_beats": 4,
+    "values": [60, 65, 80, 140, 145, 150, 200, 195, 185, 190, 245, 240, 85, 80, 210, 205, 55, 50]
+  },
+  "calibration_ms": 0
+}

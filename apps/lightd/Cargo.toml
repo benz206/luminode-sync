@@ -1,0 +1,22 @@
+[package]
+name    = "lightd"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "lightd"
+path = "src/main.rs"
+
+[dependencies]
+beatmap_core  = { path = "../../crates/beatmap_core" }
+runtime_sync  = { path = "../../crates/runtime_sync" }
+light_engine  = { path = "../../crates/light_engine" }
+pi_output     = { path = "../../crates/pi_output" }
+tokio         = { workspace = true }
+serde         = { workspace = true }
+toml          = { workspace = true }
+clap          = { workspace = true }
+anyhow        = { workspace = true }
+tracing       = { workspace = true }
+tracing-subscriber = { workspace = true }
+libc          = "0.2"
