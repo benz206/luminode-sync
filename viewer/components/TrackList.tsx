@@ -2,8 +2,13 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { TrackEntry } from "@/lib/types";
+import BatchJobs from "@/components/BatchJobs";
+
+export type Source = "local" | "remote";
 
 interface Props {
+  source: Source;
+  onSourceChange: (s: Source) => void;
   tracks: TrackEntry[];
   queue: TrackEntry[];
   queueIndex: number;
@@ -16,7 +21,7 @@ interface Props {
   onAddToQueue: (track: TrackEntry) => void;
 }
 
-type Tab = "library" | "queue";
+type Tab = "library" | "queue" | "jobs";
 
 interface CtxMenu {
   x: number;
@@ -25,6 +30,8 @@ interface CtxMenu {
 }
 
 export default function TrackList({
+  source,
+  onSourceChange,
   tracks,
   queue,
   queueIndex,
@@ -71,12 +78,30 @@ export default function TrackList({
         ["--scrollbar-thumb-hover" as string]: accentColor ? `${accentColor}70` : "rgba(255,255,255,0.28)",
       }}
     >
+      {/* Source toggle */}
+      <div className="px-3 pt-3 pb-2 shrink-0 flex gap-1">
+        {(["local", "remote"] as Source[]).map((s) => (
+          <button
+            key={s}
+            onClick={() => { onSourceChange(s); if (s === "remote") setTab("jobs"); }}
+            className="flex-1 text-[10px] font-semibold tracking-wide uppercase py-1 rounded-md transition-colors"
+            style={{
+              color: source === s ? "#fff" : "rgba(255,255,255,0.25)",
+              background: source === s ? `${accent}22` : "rgba(255,255,255,0.04)",
+              border: `1px solid ${source === s ? `${accent}44` : "rgba(255,255,255,0.06)"}`,
+            }}
+          >
+            {s === "local" ? "Local" : "Remote"}
+          </button>
+        ))}
+      </div>
+
       {/* Tab bar */}
-      <div className="px-3 pt-3 pb-0 shrink-0 flex gap-1">
-        {(["library", "queue"] as Tab[]).map((t) => (
+      <div className="px-3 pb-0 shrink-0 flex gap-1">
+        {(source === "local" ? ["library", "queue"] : ["library", "queue", "jobs"]).map((t) => (
           <button
             key={t}
-            onClick={() => setTab(t)}
+            onClick={() => setTab(t as Tab)}
             className="flex-1 text-[11px] font-semibold tracking-wide uppercase py-1.5 rounded-t-md transition-colors"
             style={{
               color: tab === t ? "#fff" : "rgba(255,255,255,0.3)",
@@ -84,7 +109,9 @@ export default function TrackList({
               borderBottom: `2px solid ${tab === t ? accent : "transparent"}`,
             }}
           >
-            {t === "library" ? "Library" : `Queue${queue.length ? ` · ${queue.length}` : ""}`}
+            {t === "library" ? "Library"
+           : t === "queue"   ? `Queue${queue.length ? ` · ${queue.length}` : ""}`
+           : "Jobs"}
           </button>
         ))}
       </div>
@@ -205,6 +232,11 @@ export default function TrackList({
             </p>
           )}
         </div>
+      )}
+
+      {/* ── Jobs tab ─────────────────────────────────────────────────────────── */}
+      {tab === "jobs" && (
+        <BatchJobs accentColor={accentColor} />
       )}
 
       {/* ── Context menu ─────────────────────────────────────────────────────── */}

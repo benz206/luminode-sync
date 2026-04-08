@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 import jobs as store
 import worker
+from jobs import cancel_job
 from spotify import resolve_tracks
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -118,6 +119,35 @@ async def get_job(job_id: str):
     if not row:
         raise HTTPException(status_code=404, detail="Job not found")
     return JobInfo(**{k: row[k] for k in ("job_id", "spotify_id", "title", "status", "error")})
+
+
+@app.post("/job/{job_id}/cancel")
+async def cancel_job_endpoint(job_id: str):
+    """
+    Cancel a job. Pending jobs are marked cancelled immediately.
+    Running jobs have their subprocess killed, then are marked cancelled.
+    """
+    row = await store.get_job(job_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    status = row["status"]
+    if status in ("done", "failed", "cancelled"):
+        raise HTTPException(status_code=409, detail=f"Job already in terminal state: {status}")
+
+    if status == "running":
+        killed = await worker.kill_running(job_id)
+        if killed:
+            await store.update_job(job_id, store.Status.CANCELLED, "Cancelled by user")
+            return {"cancelled": True, "was_running": True}
+        # Race: job finished between check and kill
+        raise HTTPException(status_code=409, detail="Job finished before it could be cancelled")
+
+    # Pending: mark cancelled in DB; worker will skip it when it dequeues it
+    updated = await cancel_job(job_id)
+    if not updated:
+        raise HTTPException(status_code=409, detail="Job could not be cancelled (status changed)")
+    return {"cancelled": True, "was_running": False}
 
 
 @app.get("/queue")

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { TrackEntry } from "@/lib/types";
-import TrackList from "@/components/TrackList";
+import TrackList, { type Source } from "@/components/TrackList";
 import BeatmapPlayer from "@/components/BeatmapPlayer";
 
 function fisherYates<T>(arr: T[]): T[] {
@@ -24,6 +24,7 @@ export default function Home() {
   const [beatMultiplier, setBeatMultiplier] = useState<1 | 2 | 3>(1);
   const [syncOffset, setSyncOffset]     = useState(0);       // ms; tweaks beat timing
   const [accentColor, setAccentColor]   = useState<string | undefined>(undefined);
+  const [source, setSource]             = useState<Source>("local");
 
   // Keep a stable ref of queue + queueIndex for callbacks that close over stale values
   const queueRef      = useRef(queue);
@@ -32,11 +33,15 @@ export default function Home() {
   useEffect(() => { queueIndexRef.current = queueIndex; }, [queueIndex]);
 
   useEffect(() => {
-    fetch("/api/tracks")
+    const url = source === "remote" ? "/api/luminode/tracks" : "/api/tracks";
+    fetch(url)
       .then((r) => r.json())
-      .then((t: TrackEntry[]) => { setTracks(t); setQueue(t); })
+      .then((t: TrackEntry[]) => {
+        if (!Array.isArray(t)) return;
+        setTracks(t); setQueue(t); setQueueIndex(-1);
+      })
       .catch(console.error);
-  }, []);
+  }, [source]);
 
   const currentTrack = queueIndex >= 0 ? (queue[queueIndex] ?? null) : null;
 
@@ -113,6 +118,8 @@ export default function Home() {
   return (
     <div className="flex h-full overflow-hidden" style={{ background: "#080808" }}>
       <TrackList
+        source={source}
+        onSourceChange={setSource}
         tracks={tracks}
         queue={queue}
         queueIndex={queueIndex}

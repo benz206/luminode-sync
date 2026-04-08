@@ -14,6 +14,7 @@ class Status(str, Enum):
     RUNNING = "running"
     DONE = "done"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 async def init_db() -> None:
@@ -79,6 +80,18 @@ async def get_pending_job_ids() -> list[str]:
             "SELECT job_id FROM jobs WHERE status IN ('pending','running') ORDER BY created_at"
         ) as cur:
             return [r[0] for r in await cur.fetchall()]
+
+
+async def cancel_job(job_id: str) -> bool:
+    """Mark a pending job as cancelled. Returns True if the row was updated."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "UPDATE jobs SET status='cancelled', updated_at=unixepoch('subsec') "
+            "WHERE job_id=? AND status='pending'",
+            (job_id,),
+        )
+        await db.commit()
+        return cur.rowcount > 0
 
 
 async def reset_running_to_pending() -> None:
