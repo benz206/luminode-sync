@@ -54,3 +54,35 @@ body {
   scrollbar-width: thin;
   scrollbar-color: var(--scrollbar-thumb) transparent;
 }
+
+/* ── Volume range slider ────────────────────────────────────────────────────── */
+.volume-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  outline: none;
+  cursor: pointer;
+}
+.volume-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent, #fff);
+  box-shadow: 0 0 6px 1px color-mix(in srgb, var(--accent, #fff) 60%, transparent);
+  cursor: pointer;
+  transition: transform 0.1s;
+}
+.volume-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.25);
+}
+.volume-slider::-moz-range-thumb {
+  width: 10px;
+  height: 10px;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent, #fff);
+  cursor: pointer;
+}

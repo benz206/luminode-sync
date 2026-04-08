@@ -66,6 +66,38 @@ export function rgbToCss(c: Rgb): string {
   return `rgb(${c.r},${c.g},${c.b})`;
 }
 
+// ─── HSV → RGB ────────────────────────────────────────────────────────────────
+
+export function hsvToRgb(h: number, s: number, v: number): Rgb {
+  const c = v * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = v - c;
+  let r = 0, g = 0, b = 0;
+  if      (h < 60)  { r = c; g = x; b = 0; }
+  else if (h < 120) { r = x; g = c; b = 0; }
+  else if (h < 180) { r = 0; g = c; b = x; }
+  else if (h < 240) { r = 0; g = x; b = c; }
+  else if (h < 300) { r = x; g = 0; b = c; }
+  else              { r = c; g = 0; b = x; }
+  return {
+    r: Math.round((r + m) * 255),
+    g: Math.round((g + m) * 255),
+    b: Math.round((b + m) * 255),
+  };
+}
+
+/**
+ * Build a 12-stop full-spectrum rainbow palette.
+ * `offset` (0–1) slowly rotates the hue over time so the strip cycles.
+ */
+export function buildRainbowPalette(offset = 0): Rgb[] {
+  const stops = 12;
+  return Array.from({ length: stops }, (_, i) => {
+    const h = (((i / stops) + offset) % 1) * 360;
+    return hsvToRgb(h, 1, 1);
+  });
+}
+
 // ─── Palettes (from config/plans/default.toml) ────────────────────────────────
 
 const PALETTE_DEFS: Record<string, string[]> = {
@@ -470,30 +502,43 @@ export class EffectScheduler {
   }
 
   /**
-   * @param albumPalette  If the beatmap has a dominant_color, pass
-   *                      buildAlbumPalette(dominant_color) here.  All section
-   *                      palettes will be replaced so the strip tracks the
-   *                      album artwork throughout the track.
+   * @param albumPalette  3-stop palette from buildAlbumPalette(), or undefined.
+   * @param colorMode     "album" → use albumPalette/section palette;
+   *                      "rainbow" → full HSV spectrum cycling with time.
    */
-  render(ctx: EffectContext, beatmap: Beatmap | null, albumPalette?: Rgb[]): Rgb[] {
+  render(
+    ctx: EffectContext,
+    beatmap: Beatmap | null,
+    albumPalette?: Rgb[],
+    colorMode: "album" | "rainbow" = "album",
+    beatMultiplier: 1 | 2 | 3 = 1,
+  ): Rgb[] {
     const frame: Rgb[] = new Array(LED_COUNT).fill({ r: 0, g: 0, b: 0 });
 
-    // Base effect — use album palette when available, else section palette.
     const rule = SECTION_RULES[ctx.section];
     const effectName = beatmap ? rule.effect : "slow_gradient";
-    const palette = albumPalette
-      ?? (beatmap ? PALETTES[rule.palette] : null)
-      ?? PALETTES.cool;
+
+    let palette: Rgb[];
+    if (colorMode === "rainbow") {
+      // Rotate the hue at 1/20th of the section speed — gives a slow, dreamy cycle.
+      const offset = (ctx.time_secs * 0.05 * ctx.speed) % 1;
+      palette = buildRainbowPalette(offset);
+    } else {
+      palette = albumPalette
+        ?? (beatmap ? PALETTES[rule.palette] : null)
+        ?? PALETTES.cool;
+    }
     renderBase(effectName, ctx, palette, frame);
 
     // Beat-flash envelope: bright at beat start → dims to 35% at beat end.
     // Uses a square-root ease for a quick initial punch then a gradual tail.
     // This drives the "flash on beat" behaviour requested by the user and is
     // stored as beat_phase in the beatmap so an ESP32 can reproduce it exactly.
-    // Beat-flash envelope: 100% on beat → 50% just before the next beat.
-    // Square-root ease gives a punchy initial drop then a gradual tail.
-    // Range is [0.5, 1.0] — always visible, matching the 50-100 energy floor.
-    const beatFlash = 0.5 + 0.5 * Math.pow(1 - ctx.beat_phase, 0.5);
+    // Beat-flash envelope — multiplier subdivides each beat into N sub-flashes.
+    // e.g. 2× flashes on every 8th note, 3× on every triplet.
+    // sqrt ease: bright at the sub-beat instant, decays quickly toward 50%.
+    const subPhase = (ctx.beat_phase * beatMultiplier) % 1;
+    const beatFlash = 0.5 + 0.5 * Math.pow(1 - subPhase, 0.5);
     for (let i = 0; i < frame.length; i++) {
       frame[i] = rgbScale(frame[i], beatFlash);
     }
