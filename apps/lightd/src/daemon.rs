@@ -31,9 +31,10 @@ use anyhow::Result;
 use tracing::{debug, info, warn};
 
 use beatmap_core::{Beatmap, LibraryIndex, TrackQuery};
-use light_engine::{EffectScheduler, LightPlan, LED_COUNT};
+use light_engine::{EffectScheduler, LightPlan};
 use pi_output::{LedOutput, Pixel};
-use runtime_sync::{SpotifyClient, SyncState, SyncAnchor, UpdateResult};
+use runtime_sync::{SpotifyClient, SyncState, SyncAnchor};
+use runtime_sync::clock::UpdateResult;
 
 use crate::config::Config;
 
@@ -284,10 +285,11 @@ fn load_beatmap_for_track(
 
 fn cue_kind_str(kind: &beatmap_core::CueKind) -> &'static str {
     match kind {
-        beatmap_core::CueKind::Drop   => "drop",
-        beatmap_core::CueKind::Build  => "build",
-        beatmap_core::CueKind::Fill   => "fill",
-        beatmap_core::CueKind::Impact => "impact",
+        beatmap_core::CueKind::Drop      => "drop",
+        beatmap_core::CueKind::Build     => "build",
+        beatmap_core::CueKind::Fill      => "fill",
+        beatmap_core::CueKind::Impact    => "impact",
         beatmap_core::CueKind::Custom(_) => "custom",
+        _                                => "unknown",
     }
 }

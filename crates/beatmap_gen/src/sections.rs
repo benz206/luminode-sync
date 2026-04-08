@@ -84,8 +84,8 @@ fn classify_block(
     energy: f32,
     onset: f32,
     position_frac: f32,
-    n_beats: usize,
-    beat_idx: usize,
+    _n_beats: usize,
+    _beat_idx: usize,
 ) -> SectionKind {
     // Heuristic classification using energy + onset density + position.
     //

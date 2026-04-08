@@ -126,6 +126,38 @@ fn append_mono(out: &mut Vec<f32>, left: &[f32], right: &[f32]) {
     }
 }
 
+/// Extract the raw bytes of the first embedded cover-art image, if any.
+///
+/// Checks both the probe-phase metadata (e.g. ID3v2 before MP3 frames) and the
+/// format-level metadata (e.g. FLAC PICTURE block), whichever has visuals first.
+pub fn read_cover_art(path: &Path) -> Result<Vec<u8>> {
+    let file = std::fs::File::open(path)?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    let probed = symphonia::default::get_probe()
+        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())?;
+
+    // Check probe-phase metadata first (covers ID3v2 in MP3).
+    let mut probed = probed;
+    if let Some(meta) = probed.metadata.get() {
+        if let Some(rev) = meta.current() {
+            if let Some(v) = rev.visuals().first() {
+                return Ok(v.data.to_vec());
+            }
+        }
+    }
+    // Fall back to format-level metadata (covers FLAC PICTURE blocks, etc.).
+    if let Some(rev) = probed.format.metadata().current() {
+        if let Some(v) = rev.visuals().first() {
+            return Ok(v.data.to_vec());
+        }
+    }
+    anyhow::bail!("no cover art found in {}", path.display())
+}
+
 /// Read ID3/Vorbis/FLAC tags from a file.
 /// Returns (title, artist, album).
 pub fn read_tags(path: &Path) -> Result<(String, String, Option<String>)> {

@@ -16,7 +16,7 @@
 ///   • diff ≥ SNAP_MS:      hard snap (seek, pause/resume, or track change)
 
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Diffs below this are ignored (Spotify API jitter).
 const IGNORE_MS: i64 = 40;

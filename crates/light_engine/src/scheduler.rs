@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use beatmap_core::{Beatmap, SectionKind};
 use crate::color::Rgb;
 use crate::effects::{
-    self, Frame, Trigger, TriggerKind, trigger_kind_from_name,
+    self, Frame, Trigger, trigger_kind_from_name,
 };
 use crate::plan::LightPlan;
 use crate::LED_COUNT;
@@ -91,9 +91,9 @@ impl EffectScheduler {
         let beat_ctx = beatmap.timing.beat_at_position(adjusted_ms);
         let section = beatmap.section_at(adjusted_ms);
 
-        let (section_kind, section_start_beat, section_energy) = section
-            .map(|s| (s.kind.clone(), s.start_beat as usize, s.energy as f32 / 255.0))
-            .unwrap_or((SectionKind::Unknown, 0, 0.5));
+        let (section_kind, section_start_beat) = section
+            .map(|s| (s.kind.clone(), s.start_beat as usize))
+            .unwrap_or((SectionKind::Unknown, 0));
 
         // Section phase: how far through the current section are we?
         // Find the next section to know when this one ends.
@@ -173,7 +173,7 @@ impl EffectScheduler {
         let mut frame = vec![Rgb::BLACK; LED_COUNT];
 
         // ── Base effect ──────────────────────────────────────────────────────
-        let (effect_name, palette_name) = if let Some(bm) = beatmap_opt {
+        let (effect_name, palette_name) = if let Some(_bm) = beatmap_opt {
             let rule = plan.section_effect(&ctx.section);
             let effect = rule.map(|r| r.effect.as_str()).unwrap_or("slow_gradient");
             let palette = rule
@@ -190,7 +190,6 @@ impl EffectScheduler {
 
         // ── Trigger layer ─────────────────────────────────────────────────────
         // Update progress and remove expired triggers.
-        let now = Instant::now();
         self.triggers.retain_mut(|at| {
             let elapsed = at.fired_at.elapsed();
             at.trigger.progress = (elapsed.as_secs_f32() / at.duration.as_secs_f32()).min(1.0);
@@ -205,20 +204,3 @@ impl EffectScheduler {
     }
 }
 
-// retain_mut is stable since Rust 1.61 — trait impl for older toolchains:
-trait RetainMut<T> {
-    fn retain_mut<F: FnMut(&mut T) -> bool>(&mut self, f: F);
-}
-
-impl<T> RetainMut<T> for Vec<T> {
-    fn retain_mut<F: FnMut(&mut T) -> bool>(&mut self, mut f: F) {
-        let mut i = 0;
-        while i < self.len() {
-            if !f(&mut self[i]) {
-                self.remove(i);
-            } else {
-                i += 1;
-            }
-        }
-    }
-}

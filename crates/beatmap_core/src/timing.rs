@@ -133,13 +133,7 @@ impl TimingData {
     /// if seeks are common, switch to binary search on a cached positions Vec.
     pub fn beat_at_position(&self, position_ms: u32) -> BeatContext {
         // Binary search is O(log n) and works correctly for seeks.
-        let mut lo = 0usize;
-        let mut hi = self.beat_count();
-        let mut current_ms = self.first_beat_ms;
-
-        // We walk forward to find the beat just before position_ms.
-        // For a 600-beat song this is still fast; consider caching positions_ms
-        // in the daemon if profiling shows this matters.
+        // For a 600-beat song this is negligible; no caching needed.
         let positions = self.beat_positions_ms();
 
         let index = match positions.binary_search(&position_ms) {
@@ -148,7 +142,6 @@ impl TimingData {
             Err(i) if i >= positions.len() => positions.len() - 1,
             Err(i) => i - 1,
         };
-        let _ = (lo, hi, current_ms); // suppress unused warnings
 
         let beat_start = positions[index];
         let beat_end = positions.get(index + 1).copied().unwrap_or(beat_start + 500);

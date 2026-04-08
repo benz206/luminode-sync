@@ -11,7 +11,9 @@ use crate::{BeatmapError, TimingData, BEATMAP_VERSION};
 ///   • cues:           ~4 cues    × 8 bytes  ≈   32 B
 ///   • energy:         ~60 samples × 1 byte  ≈   60 B
 ///   • metadata + overhead                   ≈  200 B
-///   Total raw: ~1.3 KB → MessagePack: ~1.5 KB
+///   Total raw: ~1.3 KB minimum (short/slow song, sparse data).
+///   Real-world range: 2–9 KB depending on tempo, duration, and metadata length.
+///   Typical: 3–6 KB.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Beatmap {
     /// Format version — always first so readers can reject incompatible files.
@@ -143,6 +145,12 @@ pub struct TrackMeta {
 
     /// BPM as detected (informational only — timing data is authoritative).
     pub detected_bpm: f32,
+
+    /// Dominant RGB colour extracted from the album art at generation time.
+    /// Stored as [r, g, b] bytes.  None if no cover art was found.
+    /// Intended for use by both the viewer and embedded firmware (ESP32).
+    #[serde(default)]
+    pub dominant_color: Option<[u8; 3]>,
 }
 
 // ─── Sections ────────────────────────────────────────────────────────────────

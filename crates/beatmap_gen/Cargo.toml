@@ -8,6 +8,7 @@ beatmap_core = { path = "../beatmap_core" }
 serde        = { workspace = true }
 serde_json   = { workspace = true }
 anyhow       = { workspace = true }
+tracing      = { workspace = true }
 sha2         = { workspace = true }
 hex          = { workspace = true }
 
@@ -26,3 +27,6 @@ realfft = "3"
 # Parallel directory scanning
 rayon    = "1"
 walkdir  = "2"
+
+# Lightweight image decoding for album art colour extraction (dev-machine only).
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }

@@ -2,13 +2,15 @@ pub mod decode;
 pub mod analysis;
 pub mod sections;
 pub mod library;
+pub mod ml_beats;
+pub mod color;
 
 pub use decode::AudioBuffer;
 pub use analysis::{AnalysisResult, BeatTracker};
 
 use anyhow::Result;
 use beatmap_core::{
-    Beatmap, BeatmapError, CueKind, EnergyEnvelope, Section, SectionKind, TimingData, TrackMeta,
+    Beatmap, CueKind, EnergyEnvelope, TimingData, TrackMeta,
     BEATMAP_VERSION,
 };
 use sha2::{Digest, Sha256};
@@ -25,8 +27,17 @@ pub fn generate(audio_path: &Path, spotify_id: Option<String>, isrc: Option<Stri
     let buf = decode::decode_audio(audio_path)?;
     let duration_ms = ((buf.samples.len() as f64 / buf.sample_rate as f64) * 1000.0) as u32;
 
-    // ── 3. Run onset detection + beat tracking ─────────────────────────────────
-    let analysis = analysis::analyze(&buf)?;
+    // ── 3. Beat tracking: try ML (madmom) first, fall back to DSP ────────────
+    let analysis = match ml_beats::track(audio_path) {
+        Ok(ml) => {
+            tracing::debug!("ML beat tracker: {:.1} BPM, {} beats", ml.bpm, ml.beats.len());
+            analysis::analyze_from_beats(&buf, &ml.beats, &ml.downbeats, ml.bpm)?
+        }
+        Err(e) => {
+            tracing::warn!("ML beat tracker unavailable ({e:#}) — falling back to DSP");
+            analysis::analyze(&buf)?
+        }
+    };
 
     // ── 4. Classify sections from energy + onset density ──────────────────────
     let section_list = sections::classify(&analysis, &buf);
@@ -48,6 +59,17 @@ pub fn generate(audio_path: &Path, spotify_id: Option<String>, isrc: Option<Stri
             (stem, "Unknown".into(), None)
         });
 
+    // ── 7b. Extract dominant colour from embedded album art ───────────────────
+    let dominant_color = decode::read_cover_art(audio_path)
+        .ok()
+        .and_then(|art_bytes| color::dominant_color(&art_bytes));
+
+    if let Some(c) = dominant_color {
+        tracing::debug!("album art colour: #{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
+    } else {
+        tracing::debug!("no album art found — dominant_color will be None");
+    }
+
     // ── 8. Assemble the beatmap ────────────────────────────────────────────────
     let timing = TimingData::from_beat_positions(
         &analysis.beat_times_ms,
@@ -64,6 +86,7 @@ pub fn generate(audio_path: &Path, spotify_id: Option<String>, isrc: Option<Stri
         isrc,
         source_hash,
         detected_bpm: analysis.bpm,
+        dominant_color,
     };
 
     let bm = Beatmap {

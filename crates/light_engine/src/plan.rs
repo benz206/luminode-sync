@@ -52,14 +52,14 @@ impl LightPlan {
     }
 
     /// Find all beat rules matching `beat_class`.
-    pub fn beat_effects(&self, beat_class: &str) -> impl Iterator<Item = &BeatRule> {
+    pub fn beat_effects<'a>(&'a self, beat_class: &'a str) -> impl Iterator<Item = &'a BeatRule> {
         self.beat_rule
             .iter()
             .filter(move |r| r.beat_class == beat_class)
     }
 
     /// Find cue rules matching `cue_type`.
-    pub fn cue_effects(&self, cue_type: &str) -> impl Iterator<Item = &CueRule> {
+    pub fn cue_effects<'a>(&'a self, cue_type: &'a str) -> impl Iterator<Item = &'a CueRule> {
         self.cue_rule
             .iter()
             .filter(move |r| r.cue == cue_type)
@@ -124,7 +124,7 @@ pub struct CueRule {
     pub trigger: String,
     #[serde(default = "hundred")]
     pub duration_ms: u32,
-    #[serde(default = "one")]
+    #[serde(default = "one_u32")]
     pub priority: u32,
     #[serde(default = "one")]
     pub strength: f32,
@@ -141,6 +141,7 @@ pub struct FallbackConfig {
 }
 
 fn one() -> f32 { 1.0 }
+fn one_u32() -> u32 { 1 }
 fn half() -> f32 { 0.5 }
 fn hundred() -> u32 { 100 }
 fn default_fallback_effect() -> String { "slow_gradient".to_owned() }

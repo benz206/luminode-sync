@@ -9,7 +9,7 @@
 ///   GET /me/player/currently-playing  (every poll_interval_secs)
 ///   POST /api/token                    (to refresh the access token)
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -65,7 +65,8 @@ pub struct SpotifyClient {
     auth: SpotifyAuth,
     token_path: std::path::PathBuf,
     last_request: Option<Instant>,
-    /// Minimum interval between requests to avoid rate-limiting.
+    /// Minimum interval between requests to avoid rate-limiting (enforced by caller).
+    #[allow(dead_code)]
     min_interval: Duration,
 }
 
@@ -195,8 +196,6 @@ impl SpotifyClient {
 /// Call this from `lightd auth` or `beatmap-cli auth`.
 /// Starts a temporary local HTTP server to receive the callback.
 pub async fn run_auth_flow(client_id: &str, port: u16) -> Result<SpotifyAuth> {
-    use std::collections::HashMap;
-
     // Generate code verifier (random 96-byte base64url string).
     let verifier = generate_code_verifier();
     let challenge = code_challenge(&verifier);
@@ -286,7 +285,7 @@ async fn receive_auth_code(port: u16) -> Result<String> {
 
     // Send a minimal success response.
     stream
-        .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nAuth complete — return to terminal.")
+        .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nAuth complete. Return to terminal.")
         .await?;
 
     Ok(code)
@@ -306,7 +305,6 @@ fn code_challenge(verifier: &str) -> String {
 }
 
 fn base64url_encode(input: &[u8]) -> String {
-    use std::fmt::Write;
     // Simple base64url without padding.
     const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::new();
@@ -316,7 +314,7 @@ fn base64url_encode(input: &[u8]) -> String {
         let b0 = input[i] as usize;
         let b1 = if i + 1 < len { input[i + 1] as usize } else { 0 };
         let b2 = if i + 2 < len { input[i + 2] as usize } else { 0 };
-        out.push(TABLE[(b0 >> 2)] as char);
+        out.push(TABLE[b0 >> 2] as char);
         out.push(TABLE[((b0 & 3) << 4) | (b1 >> 4)] as char);
         if i + 1 < len { out.push(TABLE[((b1 & 0xf) << 2) | (b2 >> 6)] as char); }
         if i + 2 < len { out.push(TABLE[b2 & 0x3f] as char); }

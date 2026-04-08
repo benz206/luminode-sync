@@ -7,7 +7,7 @@
 ///   • Base effects  — continuous, section-driven.  Run every frame.
 ///   • Trigger effects — one-shot, triggered by beats/cues.  Decay over time.
 
-use crate::color::{hsv_to_rgb, Rgb};
+use crate::color::Rgb;
 use crate::scheduler::EffectContext;
 use crate::LED_COUNT;
 

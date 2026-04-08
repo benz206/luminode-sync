@@ -1,18 +1,11 @@
 /// Beat detection via spectral flux onset detection + autocorrelation beat tracking.
 ///
-/// Algorithm:
-///   1. STFT with hop=HOP_SIZE samples → magnitude spectrum per frame.
-///   2. Spectral flux onset strength = sum of positive spectral differences.
-///      (Half-wave rectified to ignore decreasing energy — standard practice.)
-///   3. Autocorrelation of the onset strength function to find the tempo period.
-///   4. Dynamic programming beat tracking: follow the dominant period while
-///      staying close to onset peaks.
-///   5. Downbeats: every `time_sig` beats (refined by onset strength peaks at
-///      those positions).
+/// Two entry points:
+///   • `analyze(buf)`                    — full DSP pipeline (onset → tempo → beats)
+///   • `analyze_from_beats(buf, beats)`  — spectral features only; beats supplied externally
 ///
-/// This is the "librosa" approach ported to Rust.  It is not perfect but
-/// produces musically sensible results for 4/4 electronic music (which is
-/// the primary use case here).  For higher accuracy, swap in aubio via FFI.
+/// The second path is used when the ML beat tracker (madmom) is available.
+/// Both paths return the same `AnalysisResult` so the rest of the pipeline is unchanged.
 
 use anyhow::Result;
 use realfft::RealFftPlanner;
@@ -20,40 +13,26 @@ use std::f32::consts::PI;
 
 use crate::AudioBuffer;
 
-/// Hop size in samples.  At 44100 Hz, 512 samples ≈ 11.6 ms per frame.
-/// This gives ~86 frames/sec onset resolution.
 const HOP_SIZE: usize = 512;
-
-/// FFT window size.  Larger → better frequency resolution.
 const FFT_SIZE: usize = 2048;
-
-/// Minimum BPM to consider.
 const BPM_MIN: f32 = 60.0;
-/// Maximum BPM to consider.
 const BPM_MAX: f32 = 200.0;
+const SMOOTH_SIGMA: f32 = 2.5;
 
 pub struct AnalysisResult {
-    /// Beat times in ms from track start (absolute).
     pub beat_times_ms: Vec<u32>,
-    /// Which of the above are bar-start downbeats.
     pub downbeat_indices: Vec<usize>,
-    /// Detected tempo in BPM.
     pub bpm: f32,
-    /// Detected time signature numerator.
     pub time_sig: u8,
-    /// Onset strength per beat (parallel to beat_times_ms).
     pub beat_onset_strengths: Vec<f32>,
-    /// Mean of onset strength across all frames.
     pub onset_strength_mean: f32,
-    /// Std dev of onset strength.
     pub onset_strength_std: f32,
-    /// RMS energy per beat (parallel to beat_times_ms).
     pub beat_rms: Vec<f32>,
-    /// 95th percentile RMS energy (for normalisation).
     pub rms_95th: f32,
 
-    // Internal: keep onset frames for section classifier.
+    #[allow(dead_code)]
     pub(crate) onset_strength: Vec<f32>,
+    #[allow(dead_code)]
     pub(crate) rms_frames: Vec<f32>,
     pub(crate) sample_rate: u32,
 }
@@ -67,7 +46,6 @@ impl AnalysisResult {
         self.beat_rms.get(beat_idx).copied().unwrap_or(0.0)
     }
 
-    /// Convert a sample index to milliseconds.
     pub fn samples_to_ms(&self, sample_idx: usize) -> u32 {
         (sample_idx as f64 / self.sample_rate as f64 * 1000.0) as u32
     }
@@ -75,17 +53,20 @@ impl AnalysisResult {
 
 pub struct BeatTracker;
 
-pub fn analyze(buf: &AudioBuffer) -> Result<AnalysisResult> {
-    let sr = buf.sample_rate as f32;
-    let hop = HOP_SIZE;
-    let n_fft = FFT_SIZE;
+// ─── Spectral features (shared by both entry points) ─────────────────────────
 
-    // ── 1. Compute STFT magnitude frames ─────────────────────────────────────
-    let frames = stft_magnitude(&buf.samples, n_fft, hop);
+struct SpectralFeatures {
+    onset_strength: Vec<f32>,   // Gaussian-smoothed spectral flux
+    rms_frames: Vec<f32>,
+    mean: f32,
+    std: f32,
+}
+
+fn compute_spectral(buf: &AudioBuffer) -> SpectralFeatures {
+    let frames = stft_magnitude(&buf.samples, FFT_SIZE, HOP_SIZE);
     let n_frames = frames.len();
 
-    // ── 2. Spectral flux onset strength ──────────────────────────────────────
-    let mut onset_strength = vec![0.0f32; n_frames];
+    let mut onset_raw = vec![0.0f32; n_frames];
     for i in 1..n_frames {
         let mut flux = 0.0f32;
         for k in 0..frames[i].len() {
@@ -94,83 +75,239 @@ pub fn analyze(buf: &AudioBuffer) -> Result<AnalysisResult> {
                 flux += diff;
             }
         }
-        onset_strength[i] = flux;
+        onset_raw[i] = flux;
     }
 
-    // Apply super-Gaussian smoothing to reduce noise.
-    let smoothed = smooth_onset(&onset_strength, 3);
+    let onset_strength = smooth_gaussian(&onset_raw, SMOOTH_SIGMA);
+    let rms_frames = compute_rms_frames(&buf.samples, HOP_SIZE);
 
-    // ── 3. Onset strength statistics ─────────────────────────────────────────
-    let mean = smoothed.iter().copied().sum::<f32>() / smoothed.len() as f32;
-    let variance = smoothed.iter().map(|&x| (x - mean).powi(2)).sum::<f32>()
-        / smoothed.len() as f32;
+    let mean = onset_strength.iter().sum::<f32>() / onset_strength.len().max(1) as f32;
+    let variance = onset_strength.iter().map(|&x| (x - mean).powi(2)).sum::<f32>()
+        / onset_strength.len().max(1) as f32;
     let std = variance.sqrt();
 
-    // ── 4. Autocorrelation to find the dominant tempo period ─────────────────
-    let frames_per_sec = sr / hop as f32;
-    let min_lag = (frames_per_sec * 60.0 / BPM_MAX) as usize;
-    let max_lag = (frames_per_sec * 60.0 / BPM_MIN) as usize;
+    SpectralFeatures { onset_strength, rms_frames, mean, std }
+}
 
-    let bpm_lag = autocorrelation_peak(&smoothed, min_lag, max_lag);
-    let bpm = 60.0 / (bpm_lag as f32 / frames_per_sec);
+fn build_result(
+    beat_times_ms: Vec<u32>,
+    downbeat_indices: Vec<usize>,
+    bpm: f32,
+    time_sig: u8,
+    spectral: SpectralFeatures,
+    buf: &AudioBuffer,
+) -> AnalysisResult {
+    let sr = buf.sample_rate as f32;
 
-    // ── 5. Dynamic programming beat tracking ─────────────────────────────────
-    let beat_frames = dp_beat_track(&smoothed, bpm_lag);
-
-    // ── 6. Convert frame indices to ms ────────────────────────────────────────
-    let beat_times_ms: Vec<u32> = beat_frames
+    let beat_onset_strengths: Vec<f32> = beat_times_ms
         .iter()
-        .map(|&f| (f as f32 * hop as f32 / sr * 1000.0) as u32)
+        .map(|&ms| {
+            let frame = (ms as f32 / 1000.0 * sr / HOP_SIZE as f32) as usize;
+            spectral.onset_strength.get(frame).copied().unwrap_or(0.0)
+        })
         .collect();
 
-    // ── 7. Identify downbeats ─────────────────────────────────────────────────
-    let time_sig = 4u8; // assume 4/4 for now; extend with meter detection later
-    let downbeat_indices: Vec<usize> = (0..beat_times_ms.len())
-        .step_by(time_sig as usize)
-        .collect();
-
-    // ── 8. Per-beat onset strength ────────────────────────────────────────────
-    let beat_onset_strengths: Vec<f32> = beat_frames
+    let beat_rms: Vec<f32> = beat_times_ms
         .iter()
-        .map(|&f| smoothed.get(f).copied().unwrap_or(0.0))
+        .map(|&ms| {
+            let frame = (ms as f32 / 1000.0 * sr / HOP_SIZE as f32) as usize;
+            spectral.rms_frames.get(frame).copied().unwrap_or(0.0)
+        })
         .collect();
 
-    // ── 9. RMS energy per frame → per beat ───────────────────────────────────
-    let rms_frames = compute_rms_frames(&buf.samples, hop);
-    let beat_rms: Vec<f32> = beat_frames
-        .iter()
-        .map(|&f| rms_frames.get(f).copied().unwrap_or(0.0))
-        .collect();
-
-    // 95th percentile for normalisation.
     let mut sorted_rms = beat_rms.clone();
     sorted_rms.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let idx_95 = (sorted_rms.len() as f32 * 0.95) as usize;
     let rms_95th = sorted_rms.get(idx_95).copied().unwrap_or(1.0).max(1e-6);
 
-    Ok(AnalysisResult {
+    AnalysisResult {
         beat_times_ms,
         downbeat_indices,
         bpm,
         time_sig,
         beat_onset_strengths,
-        onset_strength_mean: mean,
-        onset_strength_std: std,
+        onset_strength_mean: spectral.mean,
+        onset_strength_std: spectral.std,
         beat_rms,
         rms_95th,
-        onset_strength: smoothed,
-        rms_frames,
+        onset_strength: spectral.onset_strength,
+        rms_frames: spectral.rms_frames,
         sample_rate: buf.sample_rate,
-    })
+    }
 }
 
-// ─── Internal helpers ─────────────────────────────────────────────────────────
+// ─── Entry point 1: full DSP pipeline ────────────────────────────────────────
 
-/// Compute STFT magnitude frames with a Hann window.
+pub fn analyze(buf: &AudioBuffer) -> Result<AnalysisResult> {
+    let sr = buf.sample_rate as f32;
+    let spectral = compute_spectral(buf);
+
+    let frames_per_sec = sr / HOP_SIZE as f32;
+    let min_lag = (frames_per_sec * 60.0 / BPM_MAX).round() as usize;
+    let max_lag = (frames_per_sec * 60.0 / BPM_MIN).round() as usize;
+
+    let (bpm_lag, bpm_refined) =
+        select_best_tempo_lag(&spectral.onset_strength, min_lag, max_lag, frames_per_sec);
+
+    let beat_frames = dp_beat_track(&spectral.onset_strength, bpm_lag);
+
+    let beat_times_ms: Vec<u32> = beat_frames
+        .iter()
+        .map(|&f| (f as f32 * HOP_SIZE as f32 / sr * 1000.0) as u32)
+        .collect();
+
+    let time_sig = 4u8;
+    let downbeat_indices: Vec<usize> = (0..beat_times_ms.len()).step_by(time_sig as usize).collect();
+
+    Ok(build_result(beat_times_ms, downbeat_indices, bpm_refined, time_sig, spectral, buf))
+}
+
+// ─── Entry point 2: beats from ML, spectral features from DSP ────────────────
+
+/// Build an `AnalysisResult` using externally supplied beat positions (e.g. from madmom).
+/// Still runs the STFT to get onset strength and RMS for sections / energy / cues.
+pub fn analyze_from_beats(
+    buf: &AudioBuffer,
+    beat_secs: &[f64],
+    downbeat_secs: &[f64],
+    bpm: f64,
+) -> Result<AnalysisResult> {
+    let spectral = compute_spectral(buf);
+
+    let beat_times_ms: Vec<u32> = beat_secs.iter().map(|&s| (s * 1000.0) as u32).collect();
+
+    // Map each downbeat timestamp to the index of the nearest beat.
+    let downbeat_indices: Vec<usize> = downbeat_secs
+        .iter()
+        .filter_map(|&ds| {
+            let ds_ms = (ds * 1000.0) as i64;
+            beat_times_ms
+                .iter()
+                .enumerate()
+                .min_by_key(|&(_, &bms)| (bms as i64 - ds_ms).abs())
+                .map(|(i, _)| i)
+        })
+        .collect();
+
+    // Infer time signature from median beats-per-bar.
+    let time_sig = infer_time_sig(&downbeat_indices);
+
+    Ok(build_result(beat_times_ms, downbeat_indices, bpm as f32, time_sig, spectral, buf))
+}
+
+fn infer_time_sig(downbeat_indices: &[usize]) -> u8 {
+    if downbeat_indices.len() < 2 {
+        return 4;
+    }
+    let mut intervals: Vec<usize> = downbeat_indices.windows(2).map(|w| w[1] - w[0]).collect();
+    intervals.sort_unstable();
+    let median = intervals[intervals.len() / 2];
+    match median {
+        3 => 3,
+        _ => 4,
+    }
+}
+
+// ─── Tempo selection (used by the DSP path only) ──────────────────────────────
+
+fn select_best_tempo_lag(
+    onset: &[f32],
+    min_lag: usize,
+    max_lag: usize,
+    frames_per_sec: f32,
+) -> (usize, f32) {
+    let ac = autocorrelation_curve(onset, min_lag, max_lag);
+
+    let mut candidates: Vec<usize> = Vec::new();
+    for lag in (min_lag + 1)..max_lag.min(onset.len().saturating_sub(1)) {
+        if ac[lag] > ac[lag - 1] && ac[lag] >= ac[lag + 1] {
+            candidates.push(lag);
+        }
+    }
+    if let Some(global) = (min_lag..=max_lag.min(onset.len() / 2))
+        .max_by(|&a, &b| ac[a].partial_cmp(&ac[b]).unwrap_or(std::cmp::Ordering::Equal))
+    {
+        candidates.push(global);
+    }
+
+    let n_orig = candidates.len();
+    for i in 0..n_orig {
+        let lag = candidates[i];
+        let half = lag / 2;
+        let double = lag * 2;
+        if half >= min_lag && half <= max_lag { candidates.push(half); }
+        if double >= min_lag && double <= max_lag { candidates.push(double); }
+    }
+    candidates.sort_unstable();
+    candidates.dedup();
+
+    let global_mean = onset.iter().sum::<f32>() / onset.len().max(1) as f32;
+    let global_mean = global_mean.max(1e-10);
+
+    let mut best_lag = candidates.first().copied().unwrap_or(min_lag);
+    let mut best_score = f32::NEG_INFINITY;
+    for lag in candidates {
+        let score = onset_grid_score(onset, lag, global_mean);
+        if score > best_score {
+            best_score = score;
+            best_lag = lag;
+        }
+    }
+
+    let refined_lag = parabolic_peak(&ac, best_lag);
+    let refined_bpm = 60.0 * frames_per_sec / refined_lag;
+    (best_lag, refined_bpm)
+}
+
+fn autocorrelation_curve(signal: &[f32], min_lag: usize, max_lag: usize) -> Vec<f32> {
+    let n = signal.len();
+    let mut ac = vec![0.0f32; max_lag + 1];
+    for lag in min_lag..=max_lag.min(n / 2) {
+        let mut score = 0.0f32;
+        for i in 0..n - lag {
+            score += signal[i] * signal[i + lag];
+        }
+        ac[lag] = score;
+    }
+    ac
+}
+
+fn onset_grid_score(onset: &[f32], lag: usize, global_mean: f32) -> f32 {
+    if lag == 0 { return f32::NEG_INFINITY; }
+    let n = onset.len();
+    let mut best_mean = 0.0f32;
+    for start in 0..lag.min(n) {
+        let mut sum = 0.0f32;
+        let mut count = 0usize;
+        let mut pos = start;
+        while pos < n {
+            sum += onset[pos];
+            count += 1;
+            pos += lag;
+        }
+        if count > 0 {
+            let m = sum / count as f32;
+            if m > best_mean { best_mean = m; }
+        }
+    }
+    best_mean / global_mean
+}
+
+fn parabolic_peak(ac: &[f32], peak: usize) -> f32 {
+    if peak == 0 || peak + 1 >= ac.len() { return peak as f32; }
+    let y0 = ac[peak - 1];
+    let y1 = ac[peak];
+    let y2 = ac[peak + 1];
+    let denom = 2.0 * y1 - y0 - y2;
+    if denom.abs() < 1e-10 { return peak as f32; }
+    peak as f32 + 0.5 * (y0 - y2) / denom
+}
+
+// ─── DSP helpers ──────────────────────────────────────────────────────────────
+
 fn stft_magnitude(samples: &[f32], n_fft: usize, hop: usize) -> Vec<Vec<f32>> {
     let mut planner = RealFftPlanner::<f32>::new();
     let fft = planner.plan_fft_forward(n_fft);
-
     let hann: Vec<f32> = (0..n_fft)
         .map(|i| 0.5 * (1.0 - (2.0 * PI * i as f32 / (n_fft - 1) as f32).cos()))
         .collect();
@@ -181,89 +318,60 @@ fn stft_magnitude(samples: &[f32], n_fft: usize, hop: usize) -> Vec<Vec<f32>> {
 
     while pos + n_fft <= samples.len() {
         let mut input: Vec<f32> = samples[pos..pos + n_fft]
-            .iter()
-            .zip(&hann)
-            .map(|(&s, &w)| s * w)
-            .collect();
-
+            .iter().zip(&hann).map(|(&s, &w)| s * w).collect();
         let mut output = fft.make_output_vec();
         fft.process(&mut input, &mut output).ok();
-
-        let mags: Vec<f32> = output.iter().take(half_fft).map(|c| c.norm()).collect();
-        frames.push(mags);
+        frames.push(output.iter().take(half_fft).map(|c| c.norm()).collect());
         pos += hop;
     }
-
     frames
 }
 
-/// Simple moving-average smoothing.
-fn smooth_onset(data: &[f32], radius: usize) -> Vec<f32> {
+fn smooth_gaussian(data: &[f32], sigma: f32) -> Vec<f32> {
+    let radius = (3.0 * sigma).ceil() as usize;
+    let kernel: Vec<f32> = (0..=2 * radius)
+        .map(|i| {
+            let x = i as f32 - radius as f32;
+            (-x * x / (2.0 * sigma * sigma)).exp()
+        })
+        .collect();
+
     let n = data.len();
     let mut out = vec![0.0f32; n];
     for i in 0..n {
-        let lo = i.saturating_sub(radius);
-        let hi = (i + radius + 1).min(n);
-        let sum: f32 = data[lo..hi].iter().sum();
-        out[i] = sum / (hi - lo) as f32;
+        let mut sum = 0.0f32;
+        let mut weight = 0.0f32;
+        for (k, &w) in kernel.iter().enumerate() {
+            let j = i as isize + k as isize - radius as isize;
+            if j >= 0 && (j as usize) < n {
+                sum += data[j as usize] * w;
+                weight += w;
+            }
+        }
+        out[i] = sum / weight.max(1e-10);
     }
     out
 }
 
-/// Find the lag with the highest autocorrelation in [min_lag, max_lag].
-fn autocorrelation_peak(signal: &[f32], min_lag: usize, max_lag: usize) -> usize {
-    let n = signal.len();
-    let mut best_lag = min_lag;
-    let mut best_score = f32::NEG_INFINITY;
-
-    for lag in min_lag..=max_lag.min(n / 2) {
-        let mut score = 0.0f32;
-        for i in 0..n - lag {
-            score += signal[i] * signal[i + lag];
-        }
-        if score > best_score {
-            best_score = score;
-            best_lag = lag;
-        }
-    }
-
-    best_lag
-}
-
-/// Dynamic programming beat tracker.
-///
-/// Follows the estimated period `beat_lag` while maximising onset strength.
-/// The penalty for deviating from the expected period grows quadratically.
 fn dp_beat_track(onset: &[f32], beat_lag: usize) -> Vec<usize> {
     let n = onset.len();
-    if n == 0 {
-        return vec![];
-    }
+    if n == 0 { return vec![]; }
 
-    // score[i] = accumulated score of the best beat path ending at frame i.
     let mut score = vec![f32::NEG_INFINITY; n];
     let mut prev = vec![0usize; n];
 
-    // Bootstrap: first beat can be anywhere in the first 2 periods.
     for i in 0..(beat_lag * 2).min(n) {
         score[i] = onset[i];
         prev[i] = i;
     }
 
-    // Lambda controls the penalty for period deviation.
-    // Higher = stricter tempo adherence.
     let lambda = 100.0f32;
-
     for i in beat_lag..n {
         let lo = i.saturating_sub(beat_lag * 2);
-        let hi = i; // exclusive
         let mut best_score = f32::NEG_INFINITY;
         let mut best_prev = lo;
-
-        for j in lo..hi {
-            if score[j] == f32::NEG_INFINITY {
-                continue;
-            }
+        for j in lo..i {
+            if score[j] == f32::NEG_INFINITY { continue; }
             let delta = i as f32 - j as f32;
             let penalty = lambda * ((delta / beat_lag as f32).ln()).powi(2);
             let candidate = score[j] - penalty;
@@ -272,39 +380,27 @@ fn dp_beat_track(onset: &[f32], beat_lag: usize) -> Vec<usize> {
                 best_prev = j;
             }
         }
-
         score[i] = best_score + onset[i];
         prev[i] = best_prev;
     }
 
-    // Back-track from the best final frame.
-    let last = (0..n)
-        .max_by(|&a, &b| score[a].partial_cmp(&score[b]).unwrap())
-        .unwrap_or(0);
-
+    let last = (0..n).max_by(|&a, &b| score[a].partial_cmp(&score[b]).unwrap()).unwrap_or(0);
     let mut beats = Vec::new();
     let mut cur = last;
     loop {
         beats.push(cur);
         let p = prev[cur];
-        if p == cur {
-            break;
-        }
+        if p == cur { break; }
         cur = p;
     }
     beats.reverse();
-    // Deduplicate (DP sometimes produces consecutive identical frames).
     beats.dedup();
     beats
 }
 
-/// RMS energy per frame.
 fn compute_rms_frames(samples: &[f32], hop: usize) -> Vec<f32> {
-    samples
-        .chunks(hop)
-        .map(|chunk| {
-            let sum_sq: f32 = chunk.iter().map(|&s| s * s).sum();
-            (sum_sq / chunk.len() as f32).sqrt()
-        })
-        .collect()
+    samples.chunks(hop).map(|chunk| {
+        let sum_sq: f32 = chunk.iter().map(|&s| s * s).sum();
+        (sum_sq / chunk.len() as f32).sqrt()
+    }).collect()
 }

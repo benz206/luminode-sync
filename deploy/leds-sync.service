@@ -1,0 +1,31 @@
+# /etc/systemd/system/leds-sync.service
+# Spotify-synced LED daemon.
+#
+# Install:
+#   sudo cp leds-sync.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now leds-sync.service
+
+[Unit]
+Description=luminode-sync LED daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/lightd --config /etc/luminode-sync/lightd.toml
+Restart=on-failure
+RestartSec=5s
+
+# GPIO / DMA require root on Pi with ws2812 driver.
+User=root
+
+# Raise real-time priority slightly so the render thread gets steady scheduling.
+# SCHED_BATCH keeps CPU usage low; skip if you want strict 60fps.
+# Nice=-5
+
+# Keep environment clean.
+Environment=RUST_LOG=lightd=info,runtime_sync=info
+
+[Install]
+WantedBy=multi-user.target
