@@ -2,7 +2,7 @@
 #   docker build -f apps/beatmap-service/Dockerfile -t beatmap-service .
 
 # ── Stage 1: compile beatmap-cli ──────────────────────────────────────────────
-FROM rust:1.85-slim AS rust-builder
+FROM rust:latest AS rust-builder
 
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 
