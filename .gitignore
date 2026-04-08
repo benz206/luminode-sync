@@ -93,3 +93,7 @@ target
 #.idea/
 
 djtest/
+
+.env
+
+.env.local

@@ -125,27 +125,64 @@ async def queue_status():
     return {"queued": await worker.queue_size()}
 
 
+def _read_library_index() -> dict:
+    import json
+    index_path = worker.BEATMAP_LIBRARY / "index.json"
+    if not index_path.exists():
+        return {}
+    return json.loads(index_path.read_text())
+
+
+@app.get("/beatmaps")
+async def list_beatmaps():
+    """List all beatmaps currently in the library, keyed by Spotify ID."""
+    index = _read_library_index()
+    by_id = index.get("by_spotify_id", {})
+    return {
+        "total": len(by_id),
+        "beatmaps": [
+            {"spotify_id": sid, "path": rel, "size_bytes": _file_size(rel)}
+            for sid, rel in by_id.items()
+        ],
+    }
+
+
+def _file_size(relative: str) -> int | None:
+    path = worker.BEATMAP_LIBRARY / relative
+    return path.stat().st_size if path.exists() else None
+
+
+@app.post("/beatmap/{spotify_id}", response_model=SubmitResponse, status_code=202)
+async def queue_beatmap(spotify_id: str):
+    """Queue generation for a single track by Spotify ID."""
+    try:
+        tracks = resolve_tracks(f"spotify:track:{spotify_id}")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Spotify lookup failed: {e}")
+
+    batch_id = str(uuid.uuid4())
+    track = tracks[0]
+    job_id = await store.create_job(batch_id, track["id"], track.get("title"))
+    await worker.enqueue(job_id)
+    return SubmitResponse(
+        batch_id=batch_id,
+        total=1,
+        jobs=[JobInfo(job_id=job_id, spotify_id=track["id"], title=track.get("title"), status="pending")],
+    )
+
+
 @app.get("/beatmap/{spotify_id}")
 async def get_beatmap(spotify_id: str):
     """
     Looks up a beatmap by Spotify ID from the library index.
     Returns the raw .beatmap file for the Pi to consume.
     """
-    import json
-
-    library = worker.BEATMAP_LIBRARY
-    index_path = library / "index.json"
-
-    if not index_path.exists():
-        raise HTTPException(status_code=404, detail="Library index not found")
-
-    index = json.loads(index_path.read_text())
-    # by_spotify_id maps spotify_id → relative path string e.g. "beatmaps/abc123.beatmap"
+    index = _read_library_index()
     relative = index.get("by_spotify_id", {}).get(spotify_id)
     if not relative:
         raise HTTPException(status_code=404, detail="Beatmap not found for that Spotify ID")
 
-    beatmap_path = library / relative
+    beatmap_path = worker.BEATMAP_LIBRARY / relative
     if not beatmap_path.exists():
         raise HTTPException(status_code=404, detail="Beatmap file missing from disk")
 
