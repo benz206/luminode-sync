@@ -1,38 +1,35 @@
 #!/bin/sh
 set -e
 
-# Write a minimal streamrip config using the DEEZER_ARL environment variable.
-# streamrip reads from ~/.config/streamrip/config.toml by default.
-CONFIG_DIR="${HOME}/.config/streamrip"
-CONFIG_FILE="${CONFIG_DIR}/config.toml"
+# Generate a complete default streamrip config (avoids missing-key errors from
+# handwritten TOML — streamrip validates all sections at startup).
+echo "Initialising streamrip config…"
+yes | rip config reset 2>/dev/null || rip config reset || true
 
-mkdir -p "${CONFIG_DIR}"
+CONFIG_FILE="${HOME}/.config/streamrip/config.toml"
 
-if [ -z "${DEEZER_ARL}" ]; then
-    echo "WARNING: DEEZER_ARL is not set — streamrip will not be able to authenticate with Deezer."
-    echo "         Set DEEZER_ARL to your Deezer ARL cookie value (log in to deezer.com, open"
-    echo "         DevTools → Application → Cookies → copy the 'arl' cookie)."
-fi
+# Patch the Deezer ARL into the reset config using Python (no extra deps needed).
+python3 - <<'PYEOF'
+import os, re
 
-cat > "${CONFIG_FILE}" << EOF
-[deezer]
-arl = "${DEEZER_ARL}"
-quality = 2
+config_file = os.path.expanduser("~/.config/streamrip/config.toml")
+arl = os.environ.get("DEEZER_ARL", "")
 
-[downloads]
-folder = "/tmp/streamrip"
-disc_subdirectories = false
-concurrency = false
+if not arl:
+    print("WARNING: DEEZER_ARL is not set — streamrip will not authenticate with Deezer.")
+    print("         Set DEEZER_ARL to your Deezer ARL cookie value:")
+    print("         Log in to deezer.com → DevTools → Application → Cookies → 'arl'")
 
-[conversion]
-enabled = false
+with open(config_file) as f:
+    content = f.read()
 
-[filepaths]
-add_singles_to_folder = false
-folder_format = "{albumartist}/{album}"
-track_format = "{tracknumber}. {title}"
-EOF
+# Replace the arl line in the [deezer] section.
+content = re.sub(r'(?m)^(arl\s*=\s*).*$', f'\\g<1>"{arl}"', content)
 
-echo "streamrip config written to ${CONFIG_FILE}"
+with open(config_file, "w") as f:
+    f.write(content)
+
+print(f"streamrip config written: {config_file} (ARL length: {len(arl)})")
+PYEOF
 
 exec "$@"
