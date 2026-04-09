@@ -391,11 +391,19 @@ async fn cmd_download(
     use beatmap_gen::library::Library;
     use runtime_sync::spotify::{SpotifyAuth, SpotifyClient};
 
-    // ── 1. Resolve Spotify track ID from URL or bare ID ──────────────────────
+    let t0 = std::time::Instant::now();
+    let step = |n: u8, total: u8, msg: &str| {
+        println!("[{n}/{total}] {msg}");
+    };
+
+    // ── [1/5] Parse track ID ──────────────────────────────────────────────────
+    step(1, 5, &format!("Parsing Spotify track ID from: {track}"));
     let spotify_id = parse_spotify_track_id(track)
         .with_context(|| format!("could not parse Spotify track ID from: {track}"))?;
+    println!("  → {spotify_id}");
 
-    // ── 2. Load auth + resolve client_id ─────────────────────────────────────
+    // ── [2/5] Load auth ───────────────────────────────────────────────────────
+    step(2, 5, "Loading Spotify auth token");
     let auth = SpotifyAuth::load(token_file)
         .with_context(|| format!("loading token from {}  (run `beatmap-cli auth` first)", token_file.display()))?;
 
@@ -403,7 +411,6 @@ async fn cmd_download(
         .or_else(|| auth.client_id.clone())
         .context("no Spotify client ID — pass --client-id or re-run `beatmap-cli auth`")?;
 
-    // ── 3. Look up track metadata (ISRC, title, artist) ──────────────────────
     let mut spotify = SpotifyClient::new(
         client_id,
         auth,
@@ -411,40 +418,51 @@ async fn cmd_download(
         std::time::Duration::from_secs(3600),
     );
 
-    print!("Looking up track {spotify_id} on Spotify … ");
+    // ── [3/5] Spotify track lookup ────────────────────────────────────────────
+    step(3, 5, &format!("Looking up track metadata on Spotify (ID: {spotify_id})"));
+    let t_spotify = std::time::Instant::now();
     let meta = spotify.track_by_id(&spotify_id).await
         .context("Spotify track lookup failed")?;
-    println!("\"{}\" by {}", meta.title, meta.artist);
+    println!("  → \"{}\" by {}  ({:.0}ms)", meta.title, meta.artist, t_spotify.elapsed().as_millis());
+    println!("  Duration : {:.1}s", meta.duration_ms as f64 / 1000.0);
     if let Some(ref isrc) = meta.isrc {
-        println!("  ISRC: {isrc}");
+        println!("  ISRC     : {isrc}");
+    } else {
+        println!("  ISRC     : (none — will use Spotify URL as fallback)");
     }
 
-    // ── 4. Resolve Deezer track URL via ISRC (exact match), fall back to Spotify URL ──
+    // ── [4/5] Resolve Deezer URL via ISRC ────────────────────────────────────
     let download_url = match &meta.isrc {
         Some(isrc) => {
-            print!("Resolving ISRC {isrc} on Deezer … ");
+            step(4, 5, &format!("Resolving ISRC {isrc} → Deezer track ID"));
+            let t_deezer = std::time::Instant::now();
             match runtime_sync::deezer::track_id_by_isrc(isrc).await {
                 Ok(deezer_id) => {
                     let url = runtime_sync::deezer::track_url(deezer_id);
-                    println!("found (ID {deezer_id})");
+                    println!("  → Deezer ID {deezer_id}  ({:.0}ms)", t_deezer.elapsed().as_millis());
+                    println!("  URL: {url}");
                     url
                 }
                 Err(e) => {
-                    println!("not found ({e:#}) — falling back to Spotify URL");
+                    println!("  → Not found on Deezer ({e:#})");
+                    println!("  Falling back to Spotify URL");
                     format!("https://open.spotify.com/track/{spotify_id}")
                 }
             }
         }
         None => {
-            println!("No ISRC available — using Spotify URL for streamrip resolution");
+            step(4, 5, "No ISRC — skipping Deezer lookup, using Spotify URL");
             format!("https://open.spotify.com/track/{spotify_id}")
         }
     };
 
-    // ── 5. Download via streamrip into a temp directory ───────────────────────
+    // ── [5/5] Download + generate ─────────────────────────────────────────────
+    step(5, 5, "Downloading with streamrip");
     let tmp_dir = tempfile::tempdir().context("creating temp directory")?;
+    println!("  Temp dir : {}", tmp_dir.path().display());
+    println!("  Source   : {download_url}");
 
-    println!("Downloading with streamrip → {} …", tmp_dir.path().display());
+    let t_dl = std::time::Instant::now();
     let status = std::process::Command::new("rip")
         .args(["url", "--directory", tmp_dir.path().to_str().unwrap(), &download_url])
         .status()
@@ -455,30 +473,35 @@ async fn cmd_download(
     if !status.success() {
         anyhow::bail!("streamrip exited with status {status}");
     }
+    println!("  Download finished  ({:.1}s)", t_dl.elapsed().as_secs_f32());
 
-    // ── 6. Find the downloaded audio file ─────────────────────────────────────
     let audio_file = find_audio_file(tmp_dir.path())
         .context("streamrip finished but no audio file was found in the download directory")?;
+    println!("  Audio    : {}", audio_file.display());
 
-    println!("  Found: {}", audio_file.display());
-
-    // ── 7. Optionally keep a copy ─────────────────────────────────────────────
+    // Optionally keep a copy of the audio file.
     if let Some(dest_dir) = keep_audio {
         std::fs::create_dir_all(dest_dir)?;
         let dest = dest_dir.join(audio_file.file_name().unwrap());
         std::fs::copy(&audio_file, &dest)
             .with_context(|| format!("copying audio to {}", dest.display()))?;
-        println!("  Audio saved → {}", dest.display());
+        println!("  Saved    : {}", dest.display());
     }
 
-    // ── 8. Generate beatmap ───────────────────────────────────────────────────
+    // Generate beatmap.
+    println!("  Analyzing audio …");
     let mut library = Library::open(library_path)?;
-    print!("Analyzing … ");
+    let t_gen = std::time::Instant::now();
     match cmd_generate_inner(&audio_file, Some(spotify_id.clone()), meta.isrc, &mut library, force)? {
-        Some(summary) => println!("done  ({summary})"),
-        None => println!("skipped (beatmap already up to date; use --force to regenerate)"),
+        Some(summary) => {
+            println!("  Beatmap  : {summary}  ({:.1}s)", t_gen.elapsed().as_secs_f32());
+        }
+        None => {
+            println!("  Beatmap  : skipped — already up to date (use --force to regenerate)");
+        }
     }
 
+    println!("\nDone in {:.1}s", t0.elapsed().as_secs_f32());
     Ok(())
 }
 
