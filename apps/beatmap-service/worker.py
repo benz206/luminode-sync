@@ -29,6 +29,9 @@ AUDIO_EXTENSIONS = ("flac", "mp3", "m4a", "ogg", "opus", "aac", "wav")
 # Safe to reuse because the worker processes one job at a time.
 STREAMRIP_WORK_DIR = Path("/tmp/streamrip-work")
 
+# Use yt-dlp fallback when DEEZER_ARL is absent or streamrip fails.
+DEEZER_ARL = os.getenv("DEEZER_ARL", "")
+
 
 async def enqueue(job_id: str) -> None:
     await _queue.put(job_id)
@@ -126,6 +129,16 @@ def _prepare_work_dir() -> Path:
     return STREAMRIP_WORK_DIR
 
 
+def _find_audio(directory: Path) -> str | None:
+    """Recursively find the first audio file under directory."""
+    for ext in AUDIO_EXTENSIONS:
+        matches = glob.glob(str(directory / "**" / f"*.{ext}"), recursive=True)
+        matches += glob.glob(str(directory / f"*.{ext}"))
+        if matches:
+            return matches[0]
+    return None
+
+
 async def _resolve_download_url(spotify_id: str) -> tuple[str, str | None]:
     """
     Returns (download_url, isrc).
@@ -168,37 +181,56 @@ async def _process(job_id: str) -> None:
         download_url, isrc = await _resolve_download_url(spotify_id)
         log.info("[1/3] Download URL: %s", download_url)
 
-        # ── Step 2: download audio with streamrip ──────────────────────────────
-        # streamrip has no --directory flag; the output folder is set once in
-        # the config by entrypoint.sh. We clean the work dir before each job
-        # (safe because the worker is sequential).
+        # ── Step 2: download audio ─────────────────────────────────────────────
         work_dir = _prepare_work_dir()
-        log.info("[2/3] Downloading audio via streamrip → %s", work_dir)
-        rc, out, err = await _run(["rip", "url", download_url], timeout=300)
+        audio_file: str | None = None
 
-        # Check if cancelled mid-run.
-        refreshed = await get_job(job_id)
-        if refreshed and refreshed["status"] == "cancelled":
-            log.info("Job %s was cancelled during download", job_id)
-            return
+        # Try streamrip+Deezer first when an ARL is configured.
+        if DEEZER_ARL:
+            log.info("[2/3] Attempting streamrip download → %s", work_dir)
+            rc, out, err = await _run(["rip", "url", download_url], timeout=300)
 
-        combined = f"stdout:\n{out}\nstderr:\n{err}"
-        if rc != 0:
-            raise RuntimeError(f"streamrip exited {rc}:\n{combined[:3000]}")
+            refreshed = await get_job(job_id)
+            if refreshed and refreshed["status"] == "cancelled":
+                log.info("Job %s was cancelled during download", job_id)
+                return
 
-        # streamrip nests files under Artist/Album/ subdirectories.
-        audio_files = []
-        for ext in AUDIO_EXTENSIONS:
-            audio_files.extend(glob.glob(str(work_dir / "**" / f"*.{ext}"), recursive=True))
-            audio_files.extend(glob.glob(str(work_dir / f"*.{ext}")))
+            if rc == 0:
+                audio_file = _find_audio(work_dir)
+                if audio_file:
+                    log.info("[2/3] streamrip succeeded: %s", Path(audio_file).name)
+                else:
+                    log.warning("[2/3] streamrip exited 0 but no audio found — falling back to yt-dlp\nstdout: %s\nstderr: %s", out[:500], err[:500])
+            else:
+                log.warning("[2/3] streamrip exited %d — falling back to yt-dlp\nstdout: %s\nstderr: %s", rc, out[:500], err[:500])
+        else:
+            log.info("[2/3] No DEEZER_ARL set — using yt-dlp directly")
 
-        if not audio_files:
-            raise RuntimeError(
-                f"streamrip ran successfully but no audio file found.\n{combined[:1000]}"
-            )
+        # Fall back to yt-dlp with a YouTube search.
+        if audio_file is None:
+            search_title = job.get("title") or spotify_id
+            log.info("[2/3] yt-dlp: searching YouTube for %r", search_title)
+            ytdlp_cmd = [
+                "yt-dlp",
+                f"ytsearch1:{search_title}",
+                "--no-playlist",
+                "-x", "--audio-format", "mp3", "--audio-quality", "0",
+                "-o", str(work_dir / "%(title)s.%(ext)s"),
+            ]
+            rc, out, err = await _run(ytdlp_cmd, timeout=300)
 
-        audio_file = audio_files[0]
-        log.info("[2/3] Downloaded: %s", Path(audio_file).name)
+            refreshed = await get_job(job_id)
+            if refreshed and refreshed["status"] == "cancelled":
+                log.info("Job %s was cancelled during yt-dlp download", job_id)
+                return
+
+            if rc != 0:
+                raise RuntimeError(f"yt-dlp exited {rc}:\nstdout: {out[:1500]}\nstderr: {err[:1500]}")
+
+            audio_file = _find_audio(work_dir)
+            if not audio_file:
+                raise RuntimeError(f"yt-dlp ran successfully but no audio file found.\nstdout: {out[:500]}")
+            log.info("[2/3] yt-dlp succeeded: %s", Path(audio_file).name)
 
         # ── Step 3: generate beatmap ───────────────────────────────────────────
         log.info("[3/3] Generating beatmap for %s", title)

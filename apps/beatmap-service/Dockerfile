@@ -21,8 +21,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# streamrip for downloading (replaces spotdl — uses Deezer via ISRC rather than YT Music)
-RUN pip install --no-cache-dir streamrip
+# streamrip: downloads from Deezer via ISRC when DEEZER_ARL is set.
+# yt-dlp: fallback downloader using a YouTube search when no ARL is available.
+RUN pip install --no-cache-dir streamrip yt-dlp
 
 COPY --from=rust-builder /workspace/target/release/beatmap-cli /app/beatmap-cli
 

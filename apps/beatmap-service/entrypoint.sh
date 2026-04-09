@@ -2,37 +2,37 @@
 set -e
 
 if [ -z "${DEEZER_ARL}" ]; then
-    echo "WARNING: DEEZER_ARL is not set — streamrip will not authenticate with Deezer."
-    echo "         Set DEEZER_ARL to your Deezer ARL cookie value:"
-    echo "         Log in to deezer.com → DevTools → Application → Cookies → 'arl'"
+    echo "INFO: DEEZER_ARL not set — downloads will fall back to yt-dlp (YouTube)."
+    echo "      For higher quality, create a free account at deezer.com, log in,"
+    echo "      then open DevTools → Application → Cookies → copy the 'arl' value."
 fi
 
-# Generate a complete default config (avoids missing-key errors from hand-written TOML).
-echo "Initialising streamrip config..."
-rip config reset
-
-# Patch ARL and download folder into the generated config.
+# Create the streamrip config via the Python API — avoids 'rip config reset'
+# which opens /dev/tty for its confirmation prompt and cannot be piped.
 python3 - <<'PYEOF'
-import os, re
+import os, sys, pathlib
 
-config_file = os.path.expanduser("~/.config/streamrip/config.toml")
-arl         = os.environ.get("DEEZER_ARL", "")
-work_dir    = "/tmp/streamrip-work"
+config_path = pathlib.Path.home() / ".config/streamrip/config.toml"
+config_path.parent.mkdir(parents=True, exist_ok=True)
 
-with open(config_file) as f:
-    content = f.read()
+# Delete any existing (possibly corrupt/incomplete) config so streamrip
+# regenerates full defaults when Config() is first instantiated.
+config_path.unlink(missing_ok=True)
 
-def patch(pattern, replacement, text):
-    """Safe substitution — replacement is treated as a literal string."""
-    return re.sub(pattern, lambda m: m.group(1) + replacement, text, flags=re.MULTILINE)
+arl      = os.environ.get("DEEZER_ARL", "")
+work_dir = "/tmp/streamrip-work"
 
-content = patch(r"^(arl\s*=\s*).*$",    f'"{arl}"',     content)
-content = patch(r"^(folder\s*=\s*).*$", f'"{work_dir}"', content)
-
-with open(config_file, "w") as f:
-    f.write(content)
-
-print(f"streamrip config patched: arl={len(arl)} chars, folder={work_dir}")
+try:
+    from streamrip.config import Config
+    cfg = Config(str(config_path))       # creates + saves defaults if file absent
+    cfg.session.deezer.arl              = arl
+    cfg.session.downloads.folder        = work_dir
+    cfg.session.misc.check_for_updates  = False
+    cfg.save()
+    print(f"streamrip config written to {config_path} (ARL: {len(arl)} chars, folder: {work_dir})")
+except Exception as e:
+    print(f"ERROR: could not write streamrip config: {e}", file=sys.stderr)
+    sys.exit(1)
 PYEOF
 
 exec "$@"
