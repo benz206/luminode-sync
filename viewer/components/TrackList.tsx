@@ -19,6 +19,7 @@ interface Props {
   onQueueRemove: (idx: number) => void;
   onPlayNext: (track: TrackEntry) => void;
   onAddToQueue: (track: TrackEntry) => void;
+  onBatchComplete?: () => void;
 }
 
 type Tab = "library" | "queue" | "jobs";
@@ -42,6 +43,7 @@ export default function TrackList({
   onQueueRemove,
   onPlayNext,
   onAddToQueue,
+  onBatchComplete,
 }: Props) {
   const [tab, setTab] = useState<Tab>("library");
   const [query, setQuery] = useState("");
@@ -64,7 +66,9 @@ export default function TrackList({
     ? tracks.filter((t) => t.label.toLowerCase().includes(query.toLowerCase()))
     : tracks;
 
-  const upcoming = queue.slice(queueIndex + 1);
+  // Only slice upcoming when something is actually playing; queueIndex=-1 means
+  // nothing selected yet and we must not show all tracks as "Up next".
+  const upcoming = queueIndex >= 0 ? queue.slice(queueIndex + 1) : [];
 
   const accent = accentColor ?? "rgba(255,255,255,0.4)";
 
@@ -226,9 +230,14 @@ export default function TrackList({
             </div>
           )}
 
-          {upcoming.length === 0 && queueIndex < 0 && (
+          {queueIndex < 0 && (
             <p className="px-4 py-6 text-[12px]" style={{ color: "rgba(255,255,255,0.2)" }}>
-              Queue is empty
+              Nothing playing — select a track to start
+            </p>
+          )}
+          {queueIndex >= 0 && upcoming.length === 0 && (
+            <p className="px-4 py-6 text-[12px]" style={{ color: "rgba(255,255,255,0.2)" }}>
+              End of queue
             </p>
           )}
         </div>
@@ -236,7 +245,7 @@ export default function TrackList({
 
       {/* ── Jobs tab ─────────────────────────────────────────────────────────── */}
       {tab === "jobs" && (
-        <BatchJobs accentColor={accentColor} />
+        <BatchJobs accentColor={accentColor} onBatchComplete={onBatchComplete} />
       )}
 
       {/* ── Context menu ─────────────────────────────────────────────────────── */}

@@ -32,16 +32,26 @@ export default function Home() {
   useEffect(() => { queueRef.current = queue; },      [queue]);
   useEffect(() => { queueIndexRef.current = queueIndex; }, [queueIndex]);
 
-  useEffect(() => {
-    const url = source === "remote" ? "/api/luminode/tracks" : "/api/tracks";
+  const fetchTracks = useCallback((src: typeof source) => {
+    const url = src === "remote" ? "/api/luminode/tracks" : "/api/tracks";
     fetch(url)
       .then((r) => r.json())
       .then((t: TrackEntry[]) => {
         if (!Array.isArray(t)) return;
-        setTracks(t); setQueue(t); setQueueIndex(-1);
+        setTracks(t);
+        // Don't reset queue/index if something is already playing.
+        setQueue((q) => {
+          if (queueIndexRef.current >= 0) return q;
+          return t;
+        });
+        setQueueIndex((i) => (i >= 0 ? i : -1));
       })
       .catch(console.error);
-  }, [source]);
+  }, []);
+
+  useEffect(() => {
+    fetchTracks(source);
+  }, [source, fetchTracks]);
 
   const currentTrack = queueIndex >= 0 ? (queue[queueIndex] ?? null) : null;
 
@@ -130,6 +140,7 @@ export default function Home() {
         onQueueRemove={removeFromQueue}
         onPlayNext={addToQueueNext}
         onAddToQueue={addToQueueEnd}
+        onBatchComplete={() => fetchTracks(source)}
       />
       <main className="flex-1 flex flex-col overflow-hidden min-w-0">
         <BeatmapPlayer

@@ -431,50 +431,92 @@ function AllJobsView({
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export default function BatchJobs({ accentColor }: { accentColor?: string }) {
-  const [url, setUrl]                 = useState("");
-  const [submitting, setSubmitting]   = useState(false);
-  const [submitError, setSubmitError] = useState<string | null>(null);
-  const [stored, setStored]           = useState<StoredBatch[]>([]);
-  const [statuses, setStatuses]       = useState<Record<string, BatchStatus>>({});
-  const [viewMode, setViewMode]       = useState<ViewMode>("batches");
+interface ResolvedInfo {
+  original_url: string;
+  deezer_url: string;
+  isrc?: string;
+  deezer_id?: number;
+}
+
+export default function BatchJobs({
+  accentColor,
+  onBatchComplete,
+}: {
+  accentColor?: string;
+  onBatchComplete?: () => void;
+}) {
+  const [url, setUrl]                       = useState("");
+  const [submitting, setSubmitting]         = useState(false);
+  const [submitError, setSubmitError]       = useState<string | null>(null);
+  const [lastResolved, setLastResolved]     = useState<ResolvedInfo | null>(null);
+  const [stored, setStored]                 = useState<StoredBatch[]>([]);
+  const [statuses, setStatuses]             = useState<Record<string, BatchStatus>>({});
+  const [viewMode, setViewMode]             = useState<ViewMode>("batches");
+  const [lastPollTime, setLastPollTime]     = useState<number | null>(null);
   const accent = accentColor ?? "#60a5fa";
 
   useEffect(() => { setStored(loadStored()); }, []);
 
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Keep a ref to the latest statuses so the polling closure never goes stale.
+  const statusesRef = useRef(statuses);
+  useEffect(() => { statusesRef.current = statuses; }, [statuses]);
 
-  const poll = useCallback(async (batches: StoredBatch[]) => {
+  // Track which batches we've already fired onBatchComplete for.
+  const notifiedRef = useRef<Set<string>>(new Set());
+  const onBatchCompleteRef = useRef(onBatchComplete);
+  useEffect(() => { onBatchCompleteRef.current = onBatchComplete; }, [onBatchComplete]);
+
+  const storedRef = useRef(stored);
+  useEffect(() => { storedRef.current = stored; }, [stored]);
+
+  const poll = useCallback(async () => {
+    const batches = storedRef.current;
+    // Only poll batches that haven't finished yet according to the latest statuses.
     const incomplete = batches.filter((b) => {
-      const s = statuses[b.batch_id];
+      const s = statusesRef.current[b.batch_id];
       return !s || s.done + s.failed < s.total;
     });
+    if (incomplete.length === 0) return;
+
     await Promise.all(
       incomplete.map(async (b) => {
         try {
           const res = await fetch(`/api/luminode/batch/${b.batch_id}`);
-          if (res.ok) {
-            const data: BatchStatus = await res.json();
-            setStatuses((prev) => ({ ...prev, [b.batch_id]: data }));
-          }
-        } catch { /* keep existing */ }
+          if (!res.ok) return;
+          const data: BatchStatus = await res.json();
+          setStatuses((prev) => {
+            const next = { ...prev, [b.batch_id]: data };
+            // Fire onBatchComplete the first time a batch finishes.
+            if (
+              data.done + data.failed >= data.total &&
+              !notifiedRef.current.has(b.batch_id)
+            ) {
+              notifiedRef.current.add(b.batch_id);
+              // Defer so state update settles first.
+              setTimeout(() => onBatchCompleteRef.current?.(), 0);
+            }
+            return next;
+          });
+        } catch { /* keep existing status */ }
       }),
     );
-  }, [statuses]);
+    setLastPollTime(Date.now());
+  }, []); // no state deps — uses refs
 
+  // Set up polling whenever stored batches change.
   useEffect(() => {
     if (stored.length === 0) return;
-    poll(stored);
-    pollRef.current = setInterval(() => poll(stored), POLL_INTERVAL);
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stored]);
+    poll();
+    const id = setInterval(poll, POLL_INTERVAL);
+    return () => clearInterval(id);
+  }, [stored, poll]);
 
   const handleSubmit = async () => {
     const trimmed = url.trim();
     if (!trimmed) return;
     setSubmitting(true);
     setSubmitError(null);
+    setLastResolved(null);
     try {
       const res = await fetch("/api/luminode/submit", {
         method: "POST",
@@ -486,10 +528,12 @@ export default function BatchJobs({ accentColor }: { accentColor?: string }) {
         setSubmitError(data.detail ?? data.error ?? "Submission failed");
         return;
       }
+      if (data._resolved) setLastResolved(data._resolved);
+
       const entry: StoredBatch = {
         batch_id: data.batch_id,
         submitted_at: Date.now(),
-        url: trimmed,
+        url: data._resolved?.deezer_url ?? trimmed,
         total: data.total,
       };
       const next = [entry, ...stored];
@@ -504,7 +548,7 @@ export default function BatchJobs({ accentColor }: { accentColor?: string }) {
           running: 0,
           done: 0,
           failed: 0,
-          jobs: data.jobs,
+          jobs: data.jobs ?? [],
         },
       }));
       setUrl("");
@@ -555,6 +599,8 @@ export default function BatchJobs({ accentColor }: { accentColor?: string }) {
     { total: 0, done: 0, failed: 0, running: 0, pending: 0 },
   );
 
+  const hasActive = totals.running > 0 || totals.pending > 0;
+
   return (
     <div className="flex flex-col h-full overflow-hidden">
       {/* Submission form */}
@@ -577,6 +623,22 @@ export default function BatchJobs({ accentColor }: { accentColor?: string }) {
             caretColor: accent,
           }}
         />
+
+        {/* Resolution info — shown once after a successful track submit */}
+        {lastResolved && (
+          <div className="text-[10px] rounded-md px-2 py-1.5 flex flex-col gap-0.5"
+               style={{ background: "rgba(96,165,250,0.08)", border: "1px solid rgba(96,165,250,0.2)" }}>
+            <span style={{ color: "#60a5fa" }}>Resolved via ISRC → Deezer</span>
+            {lastResolved.isrc && (
+              <span style={{ color: "rgba(255,255,255,0.4)" }}>ISRC: {lastResolved.isrc}</span>
+            )}
+            <span className="truncate" style={{ color: "rgba(255,255,255,0.3)" }}
+                  title={lastResolved.deezer_url}>
+              {lastResolved.deezer_url}
+            </span>
+          </div>
+        )}
+
         {submitError && (
           <p className="text-[10px]" style={{ color: "#f87171" }}>{submitError}</p>
         )}
@@ -586,27 +648,79 @@ export default function BatchJobs({ accentColor }: { accentColor?: string }) {
           className="w-full py-1.5 rounded-md text-[11px] font-semibold transition-opacity"
           style={{ background: accent, color: "#000", opacity: submitting || !url.trim() ? 0.4 : 1 }}
         >
-          {submitting ? "Submitting…" : "Queue Batch"}
+          {submitting ? "Resolving & queuing…" : "Queue Batch"}
         </button>
       </div>
 
       <div className="h-px mx-3 shrink-0" style={{ background: "rgba(255,255,255,0.06)" }} />
 
-      {/* Global summary + view toggle */}
+      {/* Global summary + controls */}
       {stored.length > 0 && (
-        <div className="px-3 py-2 shrink-0 flex items-center justify-between">
-          <div className="text-[10px] flex gap-2">
-            <span style={{ color: "#4ade80" }}>{totals.done}</span>
-            {totals.running > 0 && <span style={{ color: "#60a5fa" }}>{totals.running} running</span>}
-            {totals.failed  > 0 && <span style={{ color: "#f87171" }}>{totals.failed} failed</span>}
-            <span style={{ color: "rgba(255,255,255,0.25)" }}>/ {totals.total}</span>
+        <div className="px-3 py-2 shrink-0 flex flex-col gap-1.5">
+          {/* Stats row */}
+          <div className="flex items-center justify-between">
+            <div className="text-[10px] flex gap-2 items-center">
+              <span style={{ color: "#4ade80" }}>{totals.done} done</span>
+              {totals.running > 0 && (
+                <span className="flex items-center gap-1" style={{ color: "#60a5fa" }}>
+                  <span className="inline-block animate-spin">⟳</span>
+                  {totals.running} downloading
+                </span>
+              )}
+              {totals.pending > 0 && (
+                <span style={{ color: "rgba(255,255,255,0.3)" }}>{totals.pending} pending</span>
+              )}
+              {totals.failed > 0 && (
+                <span style={{ color: "#f87171" }}>{totals.failed} failed</span>
+              )}
+              <span style={{ color: "rgba(255,255,255,0.15)" }}>/ {totals.total}</span>
+            </div>
+
+            <button
+              onClick={poll}
+              title="Refresh now"
+              className="text-[10px] px-1.5 py-0.5 rounded transition-colors"
+              style={{ color: "rgba(255,255,255,0.3)", background: "rgba(255,255,255,0.05)" }}
+            >
+              ↻
+            </button>
           </div>
+
+          {/* Global progress bar */}
+          {totals.total > 0 && (
+            <div className="w-full h-1 rounded-full overflow-hidden"
+                 style={{ background: "rgba(255,255,255,0.07)" }}>
+              <div
+                className="h-full rounded-full transition-all duration-500"
+                style={{
+                  width: `${Math.round(((totals.done + totals.failed) / totals.total) * 100)}%`,
+                  background: totals.failed > 0 ? "#f87171" : accent,
+                }}
+              />
+            </div>
+          )}
+
+          {/* Last poll time + activity indicator */}
+          <div className="flex items-center justify-between">
+            {lastPollTime && (
+              <span className="text-[9px]" style={{ color: "rgba(255,255,255,0.15)" }}>
+                Updated {new Date(lastPollTime).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+              </span>
+            )}
+            {hasActive && (
+              <span className="text-[9px]" style={{ color: "rgba(255,255,255,0.2)" }}>
+                polling every {POLL_INTERVAL / 1000}s
+              </span>
+            )}
+          </div>
+
+          {/* View mode toggle */}
           <div className="flex gap-1">
             {(["batches", "alljobs"] as ViewMode[]).map((m) => (
               <button
                 key={m}
                 onClick={() => setViewMode(m)}
-                className="text-[9px] font-semibold uppercase tracking-wide px-2 py-0.5 rounded"
+                className="flex-1 text-[9px] font-semibold uppercase tracking-wide px-2 py-0.5 rounded"
                 style={{
                   color: viewMode === m ? "#000" : "rgba(255,255,255,0.35)",
                   background: viewMode === m ? accent : "rgba(255,255,255,0.06)",
