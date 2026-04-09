@@ -44,7 +44,7 @@ cargo run -p beatmap-cli -- inspect beatmaps/beatmaps/<hash>.beatmap
 cargo run -p beatmap-cli -- auth --client-id <your-spotify-client-id>
 ```
 
-### 2. Deploy to the Pi
+### 2. Deploy to Pi
 
 ```bash
 # Cross-compile (requires `cross` — cargo install cross)
