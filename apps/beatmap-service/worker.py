@@ -1,19 +1,20 @@
 """Single sequential job worker — one download+generate at a time."""
 import asyncio
 import glob
+import json
 import logging
 import os
 import tempfile
+import urllib.request
 from pathlib import Path
 
+import spotify as spotify_mod
 from jobs import Status, get_job, update_job
 
 log = logging.getLogger(__name__)
 
 BEATMAP_CLI = Path(os.getenv("BEATMAP_CLI", "/app/beatmap-cli"))
 BEATMAP_LIBRARY = Path(os.getenv("BEATMAP_LIBRARY", "/data/library"))
-SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "")
-SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "")
 
 # One queue, one worker — guarantees sequential processing.
 _queue: asyncio.Queue[str] = asyncio.Queue()
@@ -21,6 +22,8 @@ _queue: asyncio.Queue[str] = asyncio.Queue()
 # Track the currently running job so it can be cancelled.
 _current_job_id: str | None = None
 _current_proc: asyncio.subprocess.Process | None = None
+
+AUDIO_EXTENSIONS = ("flac", "mp3", "m4a", "ogg", "opus", "aac", "wav")
 
 
 async def enqueue(job_id: str) -> None:
@@ -81,6 +84,54 @@ async def _run(cmd: list[str], timeout: int) -> tuple[int, str, str]:
     return proc.returncode, stdout.decode(), stderr.decode()
 
 
+# ── ISRC / Deezer resolution ──────────────────────────────────────────────────
+
+def _get_isrc_sync(spotify_id: str) -> str | None:
+    """Use the existing spotipy client (client credentials) to fetch the ISRC."""
+    try:
+        track = spotify_mod._sp().track(spotify_id)
+        return track.get("external_ids", {}).get("isrc")
+    except Exception as exc:
+        log.warning("Failed to fetch ISRC for %s: %s", spotify_id, exc)
+        return None
+
+
+def _deezer_id_by_isrc_sync(isrc: str) -> int | None:
+    """Hit the public Deezer API to resolve an ISRC to a Deezer track ID."""
+    try:
+        url = f"https://api.deezer.com/track/isrc:{isrc}"
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            data = json.loads(resp.read())
+        if data.get("error") or not data.get("id"):
+            return None
+        return int(data["id"])
+    except Exception as exc:
+        log.warning("Deezer ISRC lookup failed for %s: %s", isrc, exc)
+        return None
+
+
+async def _resolve_download_url(spotify_id: str) -> tuple[str, str | None]:
+    """
+    Returns (download_url, isrc).
+    Prefers a Deezer URL (exact ISRC match) over the Spotify URL fallback.
+    """
+    # Run blocking I/O in a thread so we don't stall the event loop.
+    isrc = await asyncio.to_thread(_get_isrc_sync, spotify_id)
+    log.info("[%s] ISRC: %s", spotify_id, isrc or "(none)")
+
+    if isrc:
+        deezer_id = await asyncio.to_thread(_deezer_id_by_isrc_sync, isrc)
+        if deezer_id:
+            url = f"https://www.deezer.com/track/{deezer_id}"
+            log.info("[%s] Resolved → Deezer ID %s", spotify_id, deezer_id)
+            return url, isrc
+        log.warning("[%s] ISRC %s not found on Deezer — falling back to Spotify URL", spotify_id, isrc)
+
+    return f"https://open.spotify.com/track/{spotify_id}", isrc
+
+
+# ── Job processor ─────────────────────────────────────────────────────────────
+
 async def _process(job_id: str) -> None:
     global _current_job_id
     job = await get_job(job_id)
@@ -97,59 +148,60 @@ async def _process(job_id: str) -> None:
 
     try:
         with tempfile.TemporaryDirectory(prefix="beatmap-") as tmpdir:
-            track_url = f"https://open.spotify.com/track/{spotify_id}"
 
-            # ── Step 1: download audio ─────────────────────────────────────────
-            spotdl_cmd = ["spotdl"]
-            if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
-                spotdl_cmd += ["--client-id", SPOTIFY_CLIENT_ID, "--client-secret", SPOTIFY_CLIENT_SECRET]
-            spotdl_cmd += [
-                "--no-cache",
-                "download", track_url,
-                "--output", tmpdir + "/",
-                "--format", "mp3",
-                "--bitrate", "320k",
-            ]
-            rc, out, err = await _run(spotdl_cmd, timeout=300)
+            # ── Step 1: resolve download URL ───────────────────────────────────
+            log.info("[1/3] Resolving download URL for %s", spotify_id)
+            download_url, isrc = await _resolve_download_url(spotify_id)
+            log.info("[1/3] Download URL: %s", download_url)
 
-            # Check if cancelled mid-run
+            # ── Step 2: download audio with streamrip ──────────────────────────
+            log.info("[2/3] Downloading audio via streamrip")
+            rip_cmd = ["rip", "url", "--directory", tmpdir, download_url]
+            rc, out, err = await _run(rip_cmd, timeout=300)
+
+            # Check if cancelled mid-run.
             refreshed = await get_job(job_id)
             if refreshed and refreshed["status"] == "cancelled":
                 log.info("Job %s was cancelled during download", job_id)
                 return
 
+            combined = f"stdout:\n{out}\nstderr:\n{err}"
             if rc != 0:
-                raise RuntimeError(f"spotdl exited {rc}:\n{err[:2000]}")
+                raise RuntimeError(f"streamrip exited {rc}:\n{combined[:3000]}")
 
-            audio_files = (
-                glob.glob(f"{tmpdir}/*.mp3")
-                + glob.glob(f"{tmpdir}/*.opus")
-                + glob.glob(f"{tmpdir}/*.flac")
-            )
+            # streamrip nests files under Artist/Album/ subdirectories.
+            audio_files = []
+            for ext in AUDIO_EXTENSIONS:
+                audio_files.extend(glob.glob(f"{tmpdir}/**/*.{ext}", recursive=True))
+                audio_files.extend(glob.glob(f"{tmpdir}/*.{ext}"))
+
             if not audio_files:
                 raise RuntimeError(
-                    f"spotdl ran successfully but no audio file found.\nstdout: {out[:500]}"
+                    f"streamrip ran successfully but no audio file found.\n{combined[:1000]}"
                 )
 
             audio_file = audio_files[0]
-            log.info("Downloaded: %s", Path(audio_file).name)
+            log.info("[2/3] Downloaded: %s", Path(audio_file).name)
 
-            # ── Step 2: generate beatmap ───────────────────────────────────────
+            # ── Step 3: generate beatmap ───────────────────────────────────────
+            log.info("[3/3] Generating beatmap for %s", title)
             BEATMAP_LIBRARY.mkdir(parents=True, exist_ok=True)
-            rc, out, err = await _run(
-                [
-                    str(BEATMAP_CLI),
-                    "generate",
-                    audio_file,
-                    "--spotify-id", spotify_id,
-                    "--library", str(BEATMAP_LIBRARY),
-                ],
-                timeout=120,
-            )
+
+            generate_cmd = [
+                str(BEATMAP_CLI),
+                "generate",
+                audio_file,
+                "--spotify-id", spotify_id,
+                "--library", str(BEATMAP_LIBRARY),
+            ]
+            if isrc:
+                generate_cmd += ["--isrc", isrc]
+
+            rc, out, err = await _run(generate_cmd, timeout=120)
             if rc != 0:
                 raise RuntimeError(f"beatmap-cli exited {rc}:\n{err[:2000]}")
 
-            log.info("Beatmap generated for %s", title)
+            log.info("[3/3] Beatmap generated for %s", title)
 
         await update_job(job_id, Status.DONE)
     finally:

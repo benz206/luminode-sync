@@ -16,13 +16,13 @@ RUN cargo build --release -p beatmap-cli
 # ── Stage 2: Python runtime ───────────────────────────────────────────────────
 FROM python:3.12-slim
 
-# ffmpeg is required by spotdl for audio conversion
+# ffmpeg is required by streamrip for audio conversion
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# spotdl itself
-RUN pip install --no-cache-dir spotdl
+# streamrip for downloading (replaces spotdl — uses Deezer via ISRC rather than YT Music)
+RUN pip install --no-cache-dir streamrip
 
 COPY --from=rust-builder /workspace/target/release/beatmap-cli /app/beatmap-cli
 
@@ -39,5 +39,12 @@ ENV BEATMAP_CLI=/app/beatmap-cli
 ENV BEATMAP_LIBRARY=/data/library
 ENV DATA_DIR=/data
 
+# DEEZER_ARL: Deezer user token (from browser cookies → deezer.com → arl cookie).
+# Required for streamrip to authenticate with Deezer.
+ENV DEEZER_ARL=""
+
 EXPOSE 8000
+
+# entrypoint.sh writes the streamrip config using DEEZER_ARL, then starts uvicorn.
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
