@@ -34,6 +34,10 @@ pub struct SpotifyAuth {
     /// When the access token expires (epoch secs — serialised as u64 for
     /// portability; re-derived from `expires_in` at auth time).
     pub expires_at_epoch_secs: u64,
+    /// Stored at auth time so offline commands (e.g. beatmap-cli download)
+    /// can refresh tokens without requiring --client-id every time.
+    #[serde(default)]
+    pub client_id: Option<String>,
 }
 
 impl SpotifyAuth {
@@ -133,6 +137,46 @@ impl SpotifyClient {
 
         self.auth.save(&self.token_path)?;
         Ok(())
+    }
+
+    /// Fetch static track info by Spotify track ID.
+    /// Useful for offline commands that need ISRC/metadata without polling playback.
+    pub async fn track_by_id(&mut self, id: &str) -> Result<SpotifyTrack> {
+        self.maybe_refresh().await?;
+
+        let url = format!("https://api.spotify.com/v1/tracks/{}", id);
+        let body: serde_json::Value = self
+            .client
+            .get(&url)
+            .bearer_auth(&self.auth.access_token)
+            .send()
+            .await
+            .context("track lookup request")?
+            .error_for_status()
+            .context("track lookup HTTP error")?
+            .json()
+            .await
+            .context("parsing track response")?;
+
+        let title = body["name"].as_str().unwrap_or("Unknown").to_owned();
+        let artist = body["artists"][0]["name"]
+            .as_str()
+            .unwrap_or("Unknown")
+            .to_owned();
+        let duration_ms = body["duration_ms"].as_u64().unwrap_or(0) as u32;
+        let isrc = body["external_ids"]["isrc"]
+            .as_str()
+            .map(|s| s.to_owned());
+
+        Ok(SpotifyTrack {
+            id: id.to_owned(),
+            title,
+            artist,
+            duration_ms,
+            progress_ms: 0,
+            is_playing: false,
+            isrc,
+        })
     }
 
     /// Poll the currently playing track.
@@ -248,7 +292,7 @@ pub async fn run_auth_flow(client_id: &str, port: u16) -> Result<SpotifyAuth> {
         .as_secs()
         + expires_in;
 
-    Ok(SpotifyAuth { access_token, refresh_token, expires_at_epoch_secs: expires_at })
+    Ok(SpotifyAuth { access_token, refresh_token, expires_at_epoch_secs: expires_at, client_id: Some(client_id.to_owned()) })
 }
 
 /// Listen on `localhost:port` and extract the `code` query parameter.

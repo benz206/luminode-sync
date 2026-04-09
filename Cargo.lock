@@ -103,9 +103,11 @@ dependencies = [
  "runtime_sync",
  "serde_json",
  "sha2",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "walkdir",
 ]
 
 [[package]]

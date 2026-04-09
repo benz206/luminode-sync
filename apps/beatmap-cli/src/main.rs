@@ -105,6 +105,36 @@ enum Command {
         force: bool,
     },
 
+    /// Download a track via streamrip and generate its beatmap in one step.
+    ///
+    /// Accepts a Spotify track URL (https://open.spotify.com/track/...) or bare track ID.
+    /// Requires streamrip ≥ 2.0 to be installed (`pip install streamrip`).
+    Download {
+        /// Spotify track URL or bare track ID.
+        track: String,
+
+        /// Override Spotify client ID (falls back to SPOTIFY_CLIENT_ID env var,
+        /// then to the client_id stored in the token file).
+        #[arg(long, env = "SPOTIFY_CLIENT_ID")]
+        client_id: Option<String>,
+
+        /// Token file written by `beatmap-cli auth`.
+        #[arg(long, default_value_os_t = default_library().join("spotify_token.json"))]
+        token_file: PathBuf,
+
+        #[arg(long, default_value_os_t = default_library())]
+        library: PathBuf,
+
+        /// Keep the downloaded audio file by copying it to this directory.
+        /// If omitted the audio is deleted after the beatmap is generated.
+        #[arg(long)]
+        keep_audio: Option<PathBuf>,
+
+        /// Force beatmap regeneration even if one already exists.
+        #[arg(long, short = 'f')]
+        force: bool,
+    },
+
     /// Run the one-time Spotify OAuth flow and save tokens to disk.
     Auth {
         /// Your Spotify app client ID (from developer.spotify.com).
@@ -147,6 +177,9 @@ async fn main() -> Result<()> {
         }
         Command::PatchArt { audio, library, force } => {
             cmd_patch_art(&audio, &library, force)?;
+        }
+        Command::Download { track, client_id, token_file, library, keep_audio, force } => {
+            cmd_download(&track, client_id, &token_file, &library, keep_audio.as_deref(), force).await?;
         }
         Command::Auth { client_id, port, token_file } => {
             cmd_auth(&client_id, port, &token_file).await?;
@@ -345,6 +378,145 @@ fn cmd_validate(path: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+async fn cmd_download(
+    track: &str,
+    client_id_arg: Option<String>,
+    token_file: &Path,
+    library_path: &Path,
+    keep_audio: Option<&Path>,
+    force: bool,
+) -> Result<()> {
+    use beatmap_gen::library::Library;
+    use runtime_sync::spotify::{SpotifyAuth, SpotifyClient};
+
+    // ── 1. Resolve Spotify track ID from URL or bare ID ──────────────────────
+    let spotify_id = parse_spotify_track_id(track)
+        .with_context(|| format!("could not parse Spotify track ID from: {track}"))?;
+
+    // ── 2. Load auth + resolve client_id ─────────────────────────────────────
+    let auth = SpotifyAuth::load(token_file)
+        .with_context(|| format!("loading token from {}  (run `beatmap-cli auth` first)", token_file.display()))?;
+
+    let client_id = client_id_arg
+        .or_else(|| auth.client_id.clone())
+        .context("no Spotify client ID — pass --client-id or re-run `beatmap-cli auth`")?;
+
+    // ── 3. Look up track metadata (ISRC, title, artist) ──────────────────────
+    let mut spotify = SpotifyClient::new(
+        client_id,
+        auth,
+        token_file,
+        std::time::Duration::from_secs(3600),
+    );
+
+    print!("Looking up track {spotify_id} on Spotify … ");
+    let meta = spotify.track_by_id(&spotify_id).await
+        .context("Spotify track lookup failed")?;
+    println!("\"{}\" by {}", meta.title, meta.artist);
+    if let Some(ref isrc) = meta.isrc {
+        println!("  ISRC: {isrc}");
+    }
+
+    // ── 4. Resolve Deezer track URL via ISRC (exact match), fall back to Spotify URL ──
+    let download_url = match &meta.isrc {
+        Some(isrc) => {
+            print!("Resolving ISRC {isrc} on Deezer … ");
+            match runtime_sync::deezer::track_id_by_isrc(isrc).await {
+                Ok(deezer_id) => {
+                    let url = runtime_sync::deezer::track_url(deezer_id);
+                    println!("found (ID {deezer_id})");
+                    url
+                }
+                Err(e) => {
+                    println!("not found ({e:#}) — falling back to Spotify URL");
+                    format!("https://open.spotify.com/track/{spotify_id}")
+                }
+            }
+        }
+        None => {
+            println!("No ISRC available — using Spotify URL for streamrip resolution");
+            format!("https://open.spotify.com/track/{spotify_id}")
+        }
+    };
+
+    // ── 5. Download via streamrip into a temp directory ───────────────────────
+    let tmp_dir = tempfile::tempdir().context("creating temp directory")?;
+
+    println!("Downloading with streamrip → {} …", tmp_dir.path().display());
+    let status = std::process::Command::new("rip")
+        .args(["url", "--directory", tmp_dir.path().to_str().unwrap(), &download_url])
+        .status()
+        .with_context(|| {
+            "could not run `rip` — is streamrip installed?  (pip install streamrip)"
+        })?;
+
+    if !status.success() {
+        anyhow::bail!("streamrip exited with status {status}");
+    }
+
+    // ── 6. Find the downloaded audio file ─────────────────────────────────────
+    let audio_file = find_audio_file(tmp_dir.path())
+        .context("streamrip finished but no audio file was found in the download directory")?;
+
+    println!("  Found: {}", audio_file.display());
+
+    // ── 7. Optionally keep a copy ─────────────────────────────────────────────
+    if let Some(dest_dir) = keep_audio {
+        std::fs::create_dir_all(dest_dir)?;
+        let dest = dest_dir.join(audio_file.file_name().unwrap());
+        std::fs::copy(&audio_file, &dest)
+            .with_context(|| format!("copying audio to {}", dest.display()))?;
+        println!("  Audio saved → {}", dest.display());
+    }
+
+    // ── 8. Generate beatmap ───────────────────────────────────────────────────
+    let mut library = Library::open(library_path)?;
+    print!("Analyzing … ");
+    match cmd_generate_inner(&audio_file, Some(spotify_id.clone()), meta.isrc, &mut library, force)? {
+        Some(summary) => println!("done  ({summary})"),
+        None => println!("skipped (beatmap already up to date; use --force to regenerate)"),
+    }
+
+    Ok(())
+}
+
+/// Extract a Spotify track ID from a URL or return the input if it looks like
+/// a bare ID already (22-char base-62 string).
+fn parse_spotify_track_id(input: &str) -> Option<String> {
+    // URL form: https://open.spotify.com/track/<ID>[?...]
+    if let Some(rest) = input.strip_prefix("https://open.spotify.com/track/") {
+        let id = rest.split('?').next().unwrap_or(rest).trim().to_owned();
+        if !id.is_empty() { return Some(id); }
+    }
+    // spotify:track:<ID>
+    if let Some(id) = input.strip_prefix("spotify:track:") {
+        let id = id.trim().to_owned();
+        if !id.is_empty() { return Some(id); }
+    }
+    // Bare ID: alphanumeric, typically 22 chars
+    if input.chars().all(|c| c.is_alphanumeric()) && input.len() >= 10 {
+        return Some(input.to_owned());
+    }
+    None
+}
+
+/// Walk a directory tree and return the first audio file found.
+fn find_audio_file(dir: &Path) -> Option<PathBuf> {
+    const AUDIO_EXTS: &[&str] = &["flac", "mp3", "m4a", "ogg", "opus", "aac", "wav", "aiff"];
+    for entry in walkdir::WalkDir::new(dir).into_iter().flatten() {
+        if entry.file_type().is_file() {
+            let ext = entry.path().extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            if AUDIO_EXTS.contains(&ext.as_str()) {
+                return Some(entry.into_path());
+            }
+        }
+    }
+    None
 }
 
 async fn cmd_auth(client_id: &str, port: u16, token_file: &Path) -> Result<()> {
