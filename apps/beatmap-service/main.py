@@ -3,7 +3,7 @@ import logging
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -301,3 +301,34 @@ async def get_beatmap(spotify_id: str):
         media_type="application/octet-stream",
         filename=beatmap_path.name,
     )
+
+
+@app.post("/beatmap/{spotify_id}/upload", status_code=201)
+async def upload_beatmap(spotify_id: str, file: UploadFile):
+    """
+    Upload a pre-generated .beatmap file and index it by Spotify ID.
+    Used by the seed script to populate the library from local beatmaps.
+    """
+    import json as _json
+    import shutil
+
+    beatmaps_dir = worker.BEATMAP_LIBRARY / "beatmaps"
+    beatmaps_dir.mkdir(parents=True, exist_ok=True)
+
+    dest = beatmaps_dir / file.filename
+    with dest.open("wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    relative = f"beatmaps/{file.filename}"
+
+    index_path = worker.BEATMAP_LIBRARY / "index.json"
+    if index_path.exists():
+        index = _json.loads(index_path.read_text())
+    else:
+        index = {"by_title": {}, "by_spotify_id": {}}
+
+    index.setdefault("by_spotify_id", {})[spotify_id] = relative
+    index_path.write_text(_json.dumps(index))
+
+    log.info("Uploaded beatmap for %s → %s", spotify_id, relative)
+    return {"spotify_id": spotify_id, "path": relative}

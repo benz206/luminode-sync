@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-seed_beatmaps.py — Submit all locally-saved beatmap tracks to the remote beatmap service.
+seed_beatmaps.py — Upload locally-generated beatmaps to the remote beatmap service.
 
 Reads beatmaps/index.json from luminode-sync, resolves each track title against
-the Spotify search API to get a Spotify ID, then POSTs to the beatmap service so
-it queues download + generation with proper spotify_id indexing.
+the Spotify search API to get a Spotify ID, then uploads the local .beatmap file
+directly to the service's /beatmap/{spotify_id}/upload endpoint.
+
+No audio is downloaded or re-generated — the existing local files are used as-is.
 
 Usage:
     cd luminode-sync
@@ -70,41 +72,28 @@ def search_spotify(token: str, query: str) -> str | None:
     return items[0]["id"] if items else None
 
 
-# ── API helper ─────────────────────────────────────────────────────────────────
+# ── Upload helper ──────────────────────────────────────────────────────────────
 
-def submit_to_api(spotify_id: str) -> dict | None:
-    """POST to /submit and return the response JSON, or None on error."""
-    url = f"{LUMINODE_URL}/submit"
+def upload_beatmap(spotify_id: str, beatmap_path: Path) -> bool:
+    """POST the .beatmap file to /beatmap/{spotify_id}/upload. Returns True on success."""
+    url = f"{LUMINODE_URL}/beatmap/{spotify_id}/upload"
     try:
-        resp = requests.post(
-            url,
-            json={"url": f"spotify:track:{spotify_id}"},
-            timeout=20,
-        )
+        with open(beatmap_path, "rb") as f:
+            resp = requests.post(
+                url,
+                files={"file": (beatmap_path.name, f, "application/octet-stream")},
+                timeout=30,
+            )
         if resp.ok:
-            return resp.json()
+            return True
         print(f"  [API {resp.status_code}] {resp.text[:200]}")
-        return None
+        return False
     except requests.RequestException as e:
         print(f"  [API error] {e}")
-        return None
+        return False
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
-
-def parse_titles(index: dict) -> list[str]:
-    """
-    Extract search-friendly titles from index.json by_title keys.
-    Key format: "artist\x00title\x00duration_bucket"
-    The local beatmaps use artist="unknown" with title="artist - track name".
-    """
-    titles = []
-    for key in index.get("by_title", {}):
-        parts = key.split("\x00")
-        if len(parts) >= 2:
-            titles.append(parts[1])  # the title/query part
-    return titles
-
 
 def main() -> None:
     if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
@@ -117,27 +106,36 @@ def main() -> None:
         sys.exit(f"Index not found: {INDEX_PATH}")
 
     index = json.loads(INDEX_PATH.read_text())
-
-    # Skip tracks that are already indexed by spotify_id on the server.
     already_indexed = set(index.get("by_spotify_id", {}).keys())
 
-    titles = parse_titles(index)
-    if not titles:
+    # Build list of (search_title, local_beatmap_path) from by_title entries.
+    tracks: list[tuple[str, Path]] = []
+    for key, rel_path in index.get("by_title", {}).items():
+        parts = key.split("\x00")
+        if len(parts) >= 2:
+            title = parts[1]
+            beatmap_path = REPO_ROOT / "beatmaps" / rel_path
+            if beatmap_path.exists():
+                tracks.append((title, beatmap_path))
+            else:
+                print(f"[warn] beatmap file missing for {title!r}: {beatmap_path}")
+
+    if not tracks:
         print("No tracks found in index.json — nothing to seed.")
         return
 
-    print(f"Found {len(titles)} tracks in local index.")
+    print(f"Found {len(tracks)} local beatmaps to seed.")
     if DRY_RUN:
         print("[DRY RUN] No API calls will be made.\n")
 
     print("Fetching Spotify client-credentials token ...")
     token = get_spotify_token()
 
-    submitted = 0
+    uploaded = 0
     skipped = 0
     not_found = 0
 
-    for title in titles:
+    for title, beatmap_path in tracks:
         print(f"\nSearching: {title!r}")
         spotify_id = search_spotify(token, title)
 
@@ -150,32 +148,29 @@ def main() -> None:
         print(f"  → {spotify_id}", end="")
 
         if spotify_id in already_indexed:
-            print("  [already in index — skipping]")
+            print("  [already indexed — skipping]")
             skipped += 1
             time.sleep(0.3)
             continue
 
         if DRY_RUN:
-            print("  [dry-run — would submit]")
-            submitted += 1
+            print(f"  [dry-run — would upload {beatmap_path.name}]")
+            uploaded += 1
             time.sleep(0.3)
             continue
 
-        result = submit_to_api(spotify_id)
-        if result:
-            job_id = result.get("jobs", [{}])[0].get("job_id", "?")
-            print(f"  submitted (job: {job_id})")
-            submitted += 1
+        if upload_beatmap(spotify_id, beatmap_path):
+            print(f"  uploaded ({beatmap_path.name})")
+            already_indexed.add(spotify_id)
+            uploaded += 1
         else:
-            print("  submission failed")
+            print("  upload failed")
 
-        # Be polite to Spotify rate limits (max ~30 req/min for client creds).
         time.sleep(0.5)
 
-    print(f"\nDone. submitted={submitted} skipped={skipped} not_found={not_found}")
-    if not DRY_RUN and submitted > 0:
-        print(f"\nMonitor progress at: {LUMINODE_URL}/queue")
-        print(f"List beatmaps at:    {LUMINODE_URL}/beatmaps")
+    print(f"\nDone. uploaded={uploaded} skipped={skipped} not_found={not_found}")
+    if not DRY_RUN and uploaded > 0:
+        print(f"\nList beatmaps at: {LUMINODE_URL}/beatmaps")
 
 
 if __name__ == "__main__":
