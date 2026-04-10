@@ -3,7 +3,7 @@ import logging
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -42,37 +42,55 @@ app = FastAPI(title="beatmap-service", lifespan=lifespan)
 
 async def _seed_library() -> None:
     """
-    On startup, submit any tracks from the local library index that are not yet
-    indexed by Spotify ID.  Runs in the background so it never delays startup.
+    On startup, copy any bundled seed beatmaps (baked into the image at
+    /app/seed_beatmaps/) into the persistent library, indexed by Spotify ID.
+    Runs in the background and is idempotent — already-indexed tracks are skipped.
     """
     import asyncio
     import json
+    import shutil
+    from pathlib import Path
 
     await asyncio.sleep(5)  # let the worker settle first
 
-    index_path = worker.BEATMAP_LIBRARY / "index.json"
-    if not index_path.exists():
-        log.info("Seed: no index.json yet, skipping")
+    seed_dir = Path("/app/seed_beatmaps")
+    seed_index_path = seed_dir / "index.json"
+    if not seed_index_path.exists():
+        log.info("Seed: no bundled beatmaps found, skipping")
         return
 
-    index = json.loads(index_path.read_text())
-    already_indexed: set[str] = set(index.get("by_spotify_id", {}).keys())
+    seed_index = json.loads(seed_index_path.read_text())
 
-    titles = []
-    for key in index.get("by_title", {}):
+    # Load (or create) the output library index.
+    output_index_path = worker.BEATMAP_LIBRARY / "index.json"
+    if output_index_path.exists():
+        output_index = json.loads(output_index_path.read_text())
+    else:
+        output_index = {"by_title": {}, "by_spotify_id": {}}
+    already_indexed: set[str] = set(output_index.get("by_spotify_id", {}).keys())
+
+    # Collect (title, source_path) pairs from the seed index.
+    tracks: list[tuple[str, Path]] = []
+    for key, rel_path in seed_index.get("by_title", {}).items():
         parts = key.split("\x00")
         if len(parts) >= 2:
-            titles.append(parts[1])
+            src = seed_dir / rel_path
+            if src.exists():
+                tracks.append((parts[1], src))
+            else:
+                log.warning("Seed: missing file for %r: %s", parts[1], src)
 
-    if not titles:
-        log.info("Seed: nothing in by_title, skipping")
+    if not tracks:
+        log.info("Seed: nothing to seed")
         return
 
-    log.info("Seed: checking %d tracks from by_title index", len(titles))
+    log.info("Seed: seeding %d bundled beatmaps", len(tracks))
+    dest_dir = worker.BEATMAP_LIBRARY / "beatmaps"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    output_index_path.parent.mkdir(parents=True, exist_ok=True)
 
-    submitted = 0
-    for title in titles:
-        # Resolve to a Spotify ID via search.
+    seeded = 0
+    for title, src in tracks:
         spotify_id = await asyncio.to_thread(search_track, title)
         if not spotify_id:
             log.debug("Seed: no Spotify match for %r", title)
@@ -84,37 +102,16 @@ async def _seed_library() -> None:
             await asyncio.sleep(0.1)
             continue
 
-        # Check whether a completed or pending job already exists for this ID.
-        existing = await _find_job_by_spotify_id(spotify_id)
-        if existing and existing["status"] in ("done", "pending", "running"):
-            log.debug("Seed: job already exists for %s (%s)", spotify_id, existing["status"])
-            await asyncio.sleep(0.1)
-            continue
+        shutil.copy2(src, dest_dir / src.name)
+        output_index.setdefault("by_spotify_id", {})[spotify_id] = f"beatmaps/{src.name}"
+        output_index_path.write_text(json.dumps(output_index))
 
-        # Queue the job.
-        batch_id = str(uuid.uuid4())
-        job_id = await store.create_job(batch_id, spotify_id, title)
-        await worker.enqueue(job_id)
-        log.info("Seed: queued %r → %s (job %s)", title, spotify_id, job_id)
-        submitted += 1
-
+        log.info("Seed: indexed %r → %s", title, spotify_id)
+        already_indexed.add(spotify_id)
+        seeded += 1
         await asyncio.sleep(0.5)  # stay within Spotify rate limits
 
-    log.info("Seed: done — submitted %d new jobs", submitted)
-
-
-async def _find_job_by_spotify_id(spotify_id: str) -> dict | None:
-    """Return the most recent job for a Spotify ID, or None."""
-    import aiosqlite
-    from jobs import DB_PATH
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM jobs WHERE spotify_id=? ORDER BY created_at DESC LIMIT 1",
-            (spotify_id,),
-        ) as cur:
-            row = await cur.fetchone()
-            return dict(row) if row else None
+    log.info("Seed: done — seeded %d beatmaps", seeded)
 
 
 # ── Request / response models ──────────────────────────────────────────────────
@@ -301,34 +298,3 @@ async def get_beatmap(spotify_id: str):
         media_type="application/octet-stream",
         filename=beatmap_path.name,
     )
-
-
-@app.post("/beatmap/{spotify_id}/upload", status_code=201)
-async def upload_beatmap(spotify_id: str, file: UploadFile):
-    """
-    Upload a pre-generated .beatmap file and index it by Spotify ID.
-    Used by the seed script to populate the library from local beatmaps.
-    """
-    import json as _json
-    import shutil
-
-    beatmaps_dir = worker.BEATMAP_LIBRARY / "beatmaps"
-    beatmaps_dir.mkdir(parents=True, exist_ok=True)
-
-    dest = beatmaps_dir / file.filename
-    with dest.open("wb") as f:
-        shutil.copyfileobj(file.file, f)
-
-    relative = f"beatmaps/{file.filename}"
-
-    index_path = worker.BEATMAP_LIBRARY / "index.json"
-    if index_path.exists():
-        index = _json.loads(index_path.read_text())
-    else:
-        index = {"by_title": {}, "by_spotify_id": {}}
-
-    index.setdefault("by_spotify_id", {})[spotify_id] = relative
-    index_path.write_text(_json.dumps(index))
-
-    log.info("Uploaded beatmap for %s → %s", spotify_id, relative)
-    return {"spotify_id": spotify_id, "path": relative}

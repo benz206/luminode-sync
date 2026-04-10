@@ -34,6 +34,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY apps/beatmap-service/ .
 
+# Seed beatmaps: pre-generated local beatmaps, indexed into the library on first start.
+COPY beatmaps/ /app/seed_beatmaps/
+
 # /data is the persistent volume mount point (library + jobs.db)
 VOLUME /data
 
