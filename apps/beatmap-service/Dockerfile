@@ -17,8 +17,9 @@ RUN cargo build --release -p beatmap-cli
 FROM python:3.12-slim
 
 # ffmpeg is required by streamrip for audio conversion
+# nodejs is required by yt-dlp for JavaScript extraction (YouTube bot check bypass)
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends ffmpeg nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # streamrip: downloads from Deezer via ISRC when DEEZER_ARL is set.

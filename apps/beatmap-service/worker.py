@@ -214,6 +214,7 @@ async def _process(job_id: str) -> None:
                 "yt-dlp",
                 f"ytsearch1:{search_title}",
                 "--no-playlist",
+                "--js-runtimes", "node",
                 "-x", "--audio-format", "mp3", "--audio-quality", "0",
                 "-o", str(work_dir / "%(title)s.%(ext)s"),
             ]
