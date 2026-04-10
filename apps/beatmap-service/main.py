@@ -10,7 +10,7 @@ from pydantic import BaseModel
 import jobs as store
 import worker
 from jobs import cancel_job
-from spotify import resolve_tracks
+from spotify import resolve_tracks, search_track
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger(__name__)
@@ -31,10 +31,90 @@ async def lifespan(app: FastAPI):
 
     import asyncio
     asyncio.create_task(worker.run_worker())
+    asyncio.create_task(_seed_library())
     yield
 
 
 app = FastAPI(title="beatmap-service", lifespan=lifespan)
+
+
+# ── Library seeding ────────────────────────────────────────────────────────────
+
+async def _seed_library() -> None:
+    """
+    On startup, submit any tracks from the local library index that are not yet
+    indexed by Spotify ID.  Runs in the background so it never delays startup.
+    """
+    import asyncio
+    import json
+
+    await asyncio.sleep(5)  # let the worker settle first
+
+    index_path = worker.BEATMAP_LIBRARY / "index.json"
+    if not index_path.exists():
+        log.info("Seed: no index.json yet, skipping")
+        return
+
+    index = json.loads(index_path.read_text())
+    already_indexed: set[str] = set(index.get("by_spotify_id", {}).keys())
+
+    titles = []
+    for key in index.get("by_title", {}):
+        parts = key.split("\x00")
+        if len(parts) >= 2:
+            titles.append(parts[1])
+
+    if not titles:
+        log.info("Seed: nothing in by_title, skipping")
+        return
+
+    log.info("Seed: checking %d tracks from by_title index", len(titles))
+
+    submitted = 0
+    for title in titles:
+        # Resolve to a Spotify ID via search.
+        spotify_id = await asyncio.to_thread(search_track, title)
+        if not spotify_id:
+            log.debug("Seed: no Spotify match for %r", title)
+            await asyncio.sleep(0.3)
+            continue
+
+        if spotify_id in already_indexed:
+            log.debug("Seed: %s already indexed, skipping", spotify_id)
+            await asyncio.sleep(0.1)
+            continue
+
+        # Check whether a completed or pending job already exists for this ID.
+        existing = await _find_job_by_spotify_id(spotify_id)
+        if existing and existing["status"] in ("done", "pending", "running"):
+            log.debug("Seed: job already exists for %s (%s)", spotify_id, existing["status"])
+            await asyncio.sleep(0.1)
+            continue
+
+        # Queue the job.
+        batch_id = str(uuid.uuid4())
+        job_id = await store.create_job(batch_id, spotify_id, title)
+        await worker.enqueue(job_id)
+        log.info("Seed: queued %r → %s (job %s)", title, spotify_id, job_id)
+        submitted += 1
+
+        await asyncio.sleep(0.5)  # stay within Spotify rate limits
+
+    log.info("Seed: done — submitted %d new jobs", submitted)
+
+
+async def _find_job_by_spotify_id(spotify_id: str) -> dict | None:
+    """Return the most recent job for a Spotify ID, or None."""
+    import aiosqlite
+    from jobs import DB_PATH
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM jobs WHERE spotify_id=? ORDER BY created_at DESC LIMIT 1",
+            (spotify_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
 
 
 # ── Request / response models ──────────────────────────────────────────────────

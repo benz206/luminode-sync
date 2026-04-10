@@ -39,6 +39,18 @@ def _track_item(track: dict) -> dict:
     }
 
 
+def search_track(query: str) -> str | None:
+    """Search for a track by name and return its Spotify ID, or None."""
+    try:
+        results = _sp().search(q=query, type="track", limit=1)
+        items = results.get("tracks", {}).get("items", [])
+        return items[0]["id"] if items else None
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("Spotify search failed for %r: %s", query, exc)
+        return None
+
+
 def resolve_tracks(url: str) -> list[dict]:
     """
     Returns a list of {"id": spotify_id, "title": "Artist - Title"} dicts.
